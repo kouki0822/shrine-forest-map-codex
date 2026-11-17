@@ -257,8 +257,7 @@ function lookAt(out,ex,ey,ez,tx,ty,tz){
  out[0]=xx;out[1]=yx;out[2]=zx;out[3]=0;
  out[4]=0;out[5]=yy;out[6]=zy;out[7]=0;
  out[8]=xz;out[9]=yz;out[10]=zz;out[11]=0;
- out[12]=-xx*ex-xz*ez;out[13]=-yx*ex-yy*ey-yz*ez;
- out[14]=-zx*ex-zy*ey-zz*ez;out[15]=1;
+ out[12]=-xx*ex-xz*ez;out[13]=-yx*ex-yy*ey-yz*ez;out[14]=-zx*ex-zy*ey-zz*ez;out[15]=1;
 }
 function aim(tx,ty,tz){yaw=Math.atan2(tx-cx,-(tz-cz));pitch=Math.atan2(ty-cy,Math.hypot(tx-cx,tz-cz))}
 function releaseTouches(){primaryTouch=-1;secondaryTouch=-1}
@@ -1075,11 +1074,11 @@ fn barkRelief(p:vec3f,n:vec3f)->f32 {
   let hy=barkRelief(p+vec3f(0.,.05,0.),originalN);
   let hz=barkRelief(p+vec3f(0.,0.,.025),originalN);
   let gradient=vec3f((hx-relief)/.025,(hy-relief)/.05,(hz-relief)/.025);
-  let filter=1.-smoothstep(.025,.16,footprint);
-  n=normalize(n-(gradient-originalN*dot(gradient,originalN))*.075*filter);
+  let barkFilter=1.-smoothstep(.025,.16,footprint);
+  n=normalize(n-(gradient-originalN*dot(gradient,originalN))*.075*barkFilter);
   let broad=noise2(p.xz*1.55+vec2f(p.y*.14,p.y*.09));
   let fine=noise2(p.xz*20.+vec2f(p.y*.63,-p.y*.37));
-  albedo*=mix(.73,.31+.91*relief,filter)+.18*broad+.075*fine;
+  albedo*=mix(.73,.31+.91*relief,barkFilter)+.18*broad+.075*fine;
   let lichen=smoothstep(.68,.88,noise2(p.xz*2.8+vec2f(p.y*.53)))*.17;
   albedo=mix(albedo,vec3f(.27,.285,.19),lichen);
   let moss=(1.-smoothstep(.18,.75,p.y))*smoothstep(.38,.78,broad)*.50;
