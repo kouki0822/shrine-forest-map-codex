@@ -156,6 +156,9 @@ const lightView=new Float32Array(16),lightProjection=new Float32Array(16),lightV
 const cpuLog=new Float64Array(MAX_FRAMES),elapsedLog=new Float64Array(MAX_FRAMES),gpuLog=new Float64Array(MAX_FRAMES);
 const submitList=new Array(1),shadowBundles=new Array(1),sceneBundles=new Array(1);
 const SACRED_X=14.3,SACRED_Z=-19.5;
+const PACKED_VERTEX_STRIDE=36;
+const halfScratchFloat=new Float32Array(1);
+const halfScratchBits=new Uint32Array(halfScratchFloat.buffer);
 
 // Views 1, 2, 3, 5 and 6 retain their camera transforms.
 // View 4 steps back to include the roots and the tree's own lower crown.
@@ -200,7 +203,7 @@ let uniformBuffer,shadowTexture,shadowView,shadowSampler;
 let shadowPipeline,meshPipeline,waterPipeline,skyPipeline,particlePipeline;
 let volumePipeline,bloomPipeline,blurPipeline,finalPipeline;
 let shadowBG,meshBG,skyBG,particleBG,volumeBG,bloomBG,blurBG,finalBG;
-let meshVB,meshIB,waterVB,waterIB,meshCount=0,waterCount=0;
+let meshParts,waterParts,meshCount=0,waterCount=0,bufferMemoryReport=null;
 let hdrTexture,hdrView,msaaTexture=null,msaaView,depthTexture,depthView;
 let volumeTexture,volumeView,bloomA,bloomAView,bloomB,bloomBView;
 let width=0,height=0,renderWidth=0,renderHeight=0;
@@ -1208,8 +1211,8 @@ const MESH_SHADER=COMMON+`
 @group(0) @binding(1) var shadow:texture_depth_2d;
 @group(0) @binding(2) var comparison:sampler_comparison;
 struct MeshIn {
- @location(0) p:vec3f,@location(1) n:vec3f,
- @location(2) color:vec3f,@location(3) extra:vec3f
+ @location(0) p:vec3f,@location(1) n:vec4f,
+ @location(2) color:vec4f,@location(3) extra:vec2f
 }
 struct MeshOut {
  @builtin(position) position:vec4f,
@@ -1217,11 +1220,11 @@ struct MeshOut {
  @location(3) @interpolate(flat) material:u32
 }
 @vertex fn meshVertex(v:MeshIn)->MeshOut {
- var o:MeshOut;let p=animated(v.p,v.extra);
- o.position=u.vp*vec4f(p,1.);o.world=p;o.normal=v.n;o.color=v.color;o.material=u32(v.extra.x);return o;
+ var o:MeshOut;let p=animated(v.p,vec3f(v.color.w,v.extra.x,v.extra.y));
+ o.position=u.vp*vec4f(p,1.);o.world=p;o.normal=v.n.xyz;o.color=v.color.xyz;o.material=u32(v.color.w);return o;
 }
 @vertex fn shadowVertex(v:MeshIn)->@builtin(position) vec4f {
- return u.lightVP*vec4f(animated(v.p,v.extra),1.);
+ return u.lightVP*vec4f(animated(v.p,vec3f(v.color.w,v.extra.x,v.extra.y)),1.);
 }
 fn shadowAmount(p:vec3f,nd:f32)->f32 {
  let q=u.lightVP*vec4f(p,1.);let s=q.xyz/q.w;
@@ -1685,8 +1688,110 @@ fn tone(c:vec3f)->vec3f {
 }
 `;
 function gpuBuffer(data,usage){
- const buffer=device.createBuffer({size:Math.ceil(data.byteLength/4)*4,usage,mappedAtCreation:true});
+ const size=Math.ceil(data.byteLength/4)*4;
+ if(size>device.limits.maxBufferSize)throw Error("Buffer upload exceeds the selected device limit: "+size+" bytes.");
+ const buffer=device.createBuffer({size,usage,mappedAtCreation:true});
  new data.constructor(buffer.getMappedRange()).set(data);buffer.unmap();return buffer;
+}
+function halfBits(value){
+ // Float32 -> IEEE binary16, round-to-nearest, ties-to-even.
+ // This is used only during world upload; no shader-f16 feature is needed.
+ halfScratchFloat[0]=value;
+ const bits=halfScratchBits[0],sign=(bits>>>16)&0x8000;
+ const exponent=(bits>>>23)&255;
+ let mantissa=bits&0x7fffff;
+ if(exponent===255)return sign|0x7c00|(mantissa?0x0200:0);
+ const halfExponent=exponent-112;
+ if(halfExponent>=31)return sign|0x7c00;
+ if(halfExponent<=0){
+  if(halfExponent<-10)return sign;
+  mantissa|=0x800000;
+  const shift=14-halfExponent;
+  let result=mantissa>>>shift;
+  const remainder=mantissa&((1<<shift)-1),midpoint=1<<(shift-1);
+  if(remainder>midpoint||(remainder===midpoint&&(result&1)))result++;
+  return sign|result;
+ }
+ let result=(halfExponent<<10)|(mantissa>>>13);
+ const remainder=mantissa&0x1fff;
+ if(remainder>0x1000||(remainder===0x1000&&(result&1)))result++;
+ return sign|result;
+}
+function packedVertexBuffer(vertices,vertexIds,count,label){
+ const size=count*PACKED_VERTEX_STRIDE;
+ if(size>device.limits.maxBufferSize)throw Error("Packed vertex upload exceeds the selected device limit: "+size+" bytes.");
+ const buffer=device.createBuffer({label,size,usage:GPUBufferUsage.VERTEX,mappedAtCreation:true});
+ const mapped=buffer.getMappedRange(),floats=new Float32Array(mapped),halves=new Uint16Array(mapped);
+ for(let i=0;i<count;i++){
+  const source=(vertexIds?vertexIds[i]:i)*12,f=i*9,h=i*18;
+  // Positions retain the exact original float32 representation.
+  floats[f]=vertices[source];floats[f+1]=vertices[source+1];floats[f+2]=vertices[source+2];
+  // Normal xyz + unused padding.
+  halves[h+6]=halfBits(vertices[source+3]);
+  halves[h+7]=halfBits(vertices[source+4]);
+  halves[h+8]=halfBits(vertices[source+5]);
+  halves[h+9]=0;
+  // Linear RGB + exactly representable integer material identifier.
+  halves[h+10]=halfBits(vertices[source+6]);
+  halves[h+11]=halfBits(vertices[source+7]);
+  halves[h+12]=halfBits(vertices[source+8]);
+  halves[h+13]=halfBits(vertices[source+9]);
+  // Wind amplitude and animation seed remain float32.
+  floats[f+7]=vertices[source+10];floats[f+8]=vertices[source+11];
+ }
+ buffer.unmap();return buffer;
+}
+function uploadGeometry(geometry,label){
+ const sourceVertices=geometry.v.length/12,packedBytes=sourceVertices*PACKED_VERTEX_STRIDE;
+ const smallIndices=sourceVertices<=65535,indexBytes=Math.ceil(geometry.i.length*(smallIndices?2:4)/4)*4;
+ const limit=device.limits.maxBufferSize,parts=[];
+ const memory={
+  sourceVertices,uploadedVertices:0,sourceVertexBytes:sourceVertices*48,
+  vertexBytes:0,sourceIndexBytes:geometry.i.length*4,indexBytes:0,
+  drawChunks:0,largestAllocationBytes:0
+ };
+ function appendPart(vertexIds,vertexCount,indices,indexFormat){
+  const vb=packedVertexBuffer(geometry.v,vertexIds,vertexCount,label+" vertices");
+  const ib=gpuBuffer(indices,GPUBufferUsage.INDEX);
+  parts.push({vb,ib,count:indices.length,indexFormat});
+  memory.uploadedVertices+=vertexCount;
+  memory.vertexBytes+=vb.size;memory.indexBytes+=ib.size;
+  memory.largestAllocationBytes=Math.max(memory.largestAllocationBytes,vb.size,ib.size);
+ }
+ if(packedBytes<=limit&&indexBytes<=limit){
+  const indices=smallIndices?new Uint16Array(geometry.i):new Uint32Array(geometry.i);
+  appendPart(null,sourceVertices,indices,smallIndices?"uint16":"uint32");
+ }else{
+  // If limit negotiation fell back, preserve every triangle in order and
+  // remap it into bounded local vertex/index buffers instead of dropping detail.
+  const vertexCapacity=Math.min(65535,Math.floor(limit/PACKED_VERTEX_STRIDE));
+  const indexCapacity=Math.min(393216,Math.floor(limit/12)*6);
+  if(vertexCapacity<3||indexCapacity<3)throw Error("The selected device cannot hold a triangle buffer.");
+  const remap=new Int32Array(sourceVertices);remap.fill(-1);
+  const vertexIds=new Uint32Array(vertexCapacity),localIndices=new Uint16Array(indexCapacity);
+  let vertexCount=0,indexCount=0;
+  function flush(){
+   if(!indexCount)return;
+   appendPart(vertexIds,vertexCount,localIndices.subarray(0,indexCount),"uint16");
+   for(let i=0;i<vertexCount;i++)remap[vertexIds[i]]=-1;
+   vertexCount=0;indexCount=0;
+  }
+  for(let i=0;i<geometry.i.length;i+=3){
+   const a=geometry.i[i],b=geometry.i[i+1],c=geometry.i[i+2];
+   const additions=(remap[a]<0?1:0)+(b!==a&&remap[b]<0?1:0)+(c!==a&&c!==b&&remap[c]<0?1:0);
+   if(vertexCount+additions>vertexCapacity||indexCount+3>indexCapacity)flush();
+   for(let j=0;j<3;j++){
+    const original=geometry.i[i+j];
+    let mapped=remap[original];
+    if(mapped<0){mapped=vertexCount;remap[original]=mapped;vertexIds[vertexCount++]=original}
+    localIndices[indexCount++]=mapped;
+   }
+  }
+  flush();
+ }
+ memory.drawChunks=parts.length;
+ bufferMemoryReport[label]=memory;
+ return parts;
 }
 function shaderModule(code,label){return device.createShaderModule({code,label})}
 function targetTexture(w,h,format,extra=0,samples=1){
@@ -1697,9 +1802,37 @@ function makeBindGroup(pipeline,entries){return device.createBindGroup({layout:p
 async function findAdapter(){
  let result=null;
  try{result=await navigator.gpu.requestAdapter({powerPreference:"high-performance"})}catch{}
- if(!result)try{result=await navigator.gpu.requestAdapter({powerPreference:"low-power"})}catch{}
  if(!result)try{result=await navigator.gpu.requestAdapter()}catch{}
+ if(!result)try{result=await navigator.gpu.requestAdapter({powerPreference:"low-power"})}catch{}
  return result;
+}
+async function requestSceneDevice(neededBufferSize){
+ const supportedBufferSize=adapter.limits.maxBufferSize;
+ const requestedBufferSize=Math.min(neededBufferSize,supportedBufferSize);
+ const reducedBufferSize=Math.min(requestedBufferSize,134217728);
+ const limitAttempts=requestedBufferSize===reducedBufferSize?[requestedBufferSize,0]:[requestedBufferSize,reducedBufferSize,0];
+ const canTimestamp=adapter.features.has("timestamp-query");
+ let lastError=null;
+ for(let i=0;i<limitAttempts.length;i++){
+  for(let featureAttempt=0;featureAttempt<(canTimestamp?2:1);featureAttempt++){
+   const extraLimit=limitAttempts[i],useTimestamp=canTimestamp&&featureAttempt===0;
+   try{
+    let result;
+    if(extraLimit===0&&!useTimestamp)result=await adapter.requestDevice();
+    else{
+     const descriptor={requiredFeatures:useTimestamp?["timestamp-query"]:[]};
+     if(extraLimit>0)descriptor.requiredLimits={maxBufferSize:extraLimit};
+     result=await adapter.requestDevice(descriptor);
+    }
+    bufferMemoryReport.deviceLimits={
+     neededMaxBufferSize:neededBufferSize,adapterMaxBufferSize:supportedBufferSize,
+     requestedMaxBufferSize:extraLimit||null,deviceMaxBufferSize:result.limits.maxBufferSize
+    };
+    return result;
+   }catch(error){lastError=error}
+  }
+ }
+ throw lastError||Error("A WebGPU device could not be created.");
 }
 async function initialize(){
  if(!navigator.gpu){
@@ -1707,10 +1840,16 @@ async function initialize(){
   throw Error("This browser does not expose WebGPU.\nUse a current browser with WebGPU support and hardware acceleration. Serve this page from HTTPS or localhost. Some phones and browser/OS combinations do not support WebGPU.");
  }
  adapter=await findAdapter();
- if(!adapter)throw Error("No WebGPU adapter was found after high-performance, low-power, and default requests.\nCheck browser support, hardware acceleration, and graphics drivers.");
- const features=[];if(adapter.features.has("timestamp-query"))features.push("timestamp-query");
- try{device=await adapter.requestDevice({requiredFeatures:features})}
- catch(error){if(!features.length)throw error;device=await adapter.requestDevice()}
+ if(!adapter)throw Error("No WebGPU adapter was found after high-performance, default, and low-power requests.\nCheck browser support, hardware acceleration, and graphics drivers.");
+ // Build once before requesting the device so limits use actual geometry sizes.
+ buildWorld();meshCount=G.i.length;waterCount=W.i.length;
+ const neededBufferSize=Math.max(
+  G.v.length/12*PACKED_VERTEX_STRIDE,Math.ceil(G.i.length*(G.v.length/12<=65535?2:4)/4)*4,
+  W.v.length/12*PACKED_VERTEX_STRIDE,Math.ceil(W.i.length*(W.v.length/12<=65535?2:4)/4)*4,
+  uniforms.byteLength,MAX_FRAMES*256
+ );
+ bufferMemoryReport={vertexStrideBefore:48,vertexStrideAfter:PACKED_VERTEX_STRIDE};
+ device=await requestSceneDevice(neededBufferSize);
  timestampSupported=device.features.has("timestamp-query");
  device.addEventListener("uncapturederror",onGPUError);device.lost.then(onDeviceLost);
  context=canvas.getContext("webgpu");if(!context)throw Error("A WebGPU canvas context could not be created.");
@@ -1729,9 +1868,10 @@ async function initialize(){
   queryResolve=device.createBuffer({size:MAX_FRAMES*256,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});
   queryRead=device.createBuffer({size:MAX_FRAMES*256,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
  }
- buildWorld();meshCount=G.i.length;waterCount=W.i.length;
- meshVB=gpuBuffer(new Float32Array(G.v),GPUBufferUsage.VERTEX);meshIB=gpuBuffer(new Uint32Array(G.i),GPUBufferUsage.INDEX);
- waterVB=gpuBuffer(new Float32Array(W.v),GPUBufferUsage.VERTEX);waterIB=gpuBuffer(new Uint32Array(W.i),GPUBufferUsage.INDEX);G=null;W=null;
+ meshParts=uploadGeometry(G,"opaque");waterParts=uploadGeometry(W,"water");G=null;W=null;
+ bufferMemoryReport.geometryBytesBefore=bufferMemoryReport.opaque.sourceVertexBytes+bufferMemoryReport.opaque.sourceIndexBytes+bufferMemoryReport.water.sourceVertexBytes+bufferMemoryReport.water.sourceIndexBytes;
+ bufferMemoryReport.geometryBytesAfter=bufferMemoryReport.opaque.vertexBytes+bufferMemoryReport.opaque.indexBytes+bufferMemoryReport.water.vertexBytes+bufferMemoryReport.water.indexBytes;
+ console.info("Komorebi GPU buffer accounting",bufferMemoryReport);
  const uniformLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:"uniform"}}]});
  const meshLayout=device.createBindGroupLayout({entries:[
   {binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:"uniform"}},
@@ -1740,9 +1880,9 @@ async function initialize(){
  ]});
  const simpleLayout=device.createPipelineLayout({bindGroupLayouts:[uniformLayout]});
  const geometryLayout=device.createPipelineLayout({bindGroupLayouts:[meshLayout]});
- const vertexBuffers=[{arrayStride:48,attributes:[
-  {shaderLocation:0,offset:0,format:"float32x3"},{shaderLocation:1,offset:12,format:"float32x3"},
-  {shaderLocation:2,offset:24,format:"float32x3"},{shaderLocation:3,offset:36,format:"float32x3"}
+ const vertexBuffers=[{arrayStride:PACKED_VERTEX_STRIDE,attributes:[
+  {shaderLocation:0,offset:0,format:"float32x3"},{shaderLocation:1,offset:12,format:"float16x4"},
+  {shaderLocation:2,offset:20,format:"float16x4"},{shaderLocation:3,offset:28,format:"float32x2"}
  ]}];
  const meshModule=shaderModule(MESH_SHADER,"forest and architecture");
  const particleModule=shaderModule(PARTICLE_SHADER,"procedural life");
@@ -1787,11 +1927,21 @@ async function initialize(){
  shadowPass={colorAttachments:[],depthStencilAttachment:{view:shadowView,depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}};
  if(timestampSupported)shadowPass.timestampWrites={querySet,beginningOfPassWriteIndex:0};
  let bundle=device.createRenderBundleEncoder({colorFormats:[],depthStencilFormat:"depth32float"});
- bundle.setPipeline(shadowPipeline);bundle.setBindGroup(0,shadowBG);bundle.setVertexBuffer(0,meshVB);bundle.setIndexBuffer(meshIB,"uint32");bundle.drawIndexed(meshCount);shadowBundles[0]=bundle.finish();
+ bundle.setPipeline(shadowPipeline);bundle.setBindGroup(0,shadowBG);
+ for(const part of meshParts){
+  bundle.setVertexBuffer(0,part.vb);bundle.setIndexBuffer(part.ib,part.indexFormat);bundle.drawIndexed(part.count);
+ }
+ shadowBundles[0]=bundle.finish();
  bundle=device.createRenderBundleEncoder({colorFormats:["rgba16float"],depthStencilFormat:"depth32float",sampleCount:SAMPLE_COUNT});
  bundle.setPipeline(skyPipeline);bundle.setBindGroup(0,skyBG);bundle.draw(3);
- bundle.setPipeline(meshPipeline);bundle.setBindGroup(0,meshBG);bundle.setVertexBuffer(0,meshVB);bundle.setIndexBuffer(meshIB,"uint32");bundle.drawIndexed(meshCount);
- bundle.setPipeline(waterPipeline);bundle.setBindGroup(0,meshBG);bundle.setVertexBuffer(0,waterVB);bundle.setIndexBuffer(waterIB,"uint32");bundle.drawIndexed(waterCount);
+ bundle.setPipeline(meshPipeline);bundle.setBindGroup(0,meshBG);
+ for(const part of meshParts){
+  bundle.setVertexBuffer(0,part.vb);bundle.setIndexBuffer(part.ib,part.indexFormat);bundle.drawIndexed(part.count);
+ }
+ bundle.setPipeline(waterPipeline);bundle.setBindGroup(0,meshBG);
+ for(const part of waterParts){
+  bundle.setVertexBuffer(0,part.vb);bundle.setIndexBuffer(part.ib,part.indexFormat);bundle.drawIndexed(part.count);
+ }
  bundle.setPipeline(particlePipeline);bundle.setBindGroup(0,particleBG);bundle.draw(36,PARTICLE_COUNT);sceneBundles[0]=bundle.finish();
  resize();aim(0,5.4,-22);
  status.textContent="Warming shaders · "+LEVEL_NAMES[detailLevel]+" detail"+(previousUnclean?"\nRecovery: lowered detail after an unfinished previous session.":"");
@@ -1937,6 +2087,7 @@ async function completeBenchmark(){
    renderResolution:{width:benchmarkWidth,height:benchmarkHeight},renderScale:benchmarkScale,
    adaptiveEnabled:dynamicResolution,adaptiveFrozenDuringTest:true,msaaSamples:SAMPLE_COUNT,
    shadowResolution:SHADOW_SIZE,geometryTriangles:meshCount/3,timestampQueries:timestampSupported,
+   bufferMemory:bufferMemoryReport,
    gpuTimingDefinition:"First shadow-pass beginning to final presentation-pass end; excludes presentation, CPU work, and query readback.",
    cpuTimingDefinition:"requestAnimationFrame interval, including scheduling and presentation pacing.",
    warmupFrames:120,scriptedDurationMs:duration,frameCount:benchmarkFrames,
