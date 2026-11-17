@@ -1,0 +1,37 @@
+Build a real-time fantasy shrine-and-forest scene that runs in the browser. It only needs to look beautiful and let me fly a free camera through it.
+
+PRIORITIES (in this order when they conflict)
+1. Visual quality
+2. Stable frame pacing at the target spec
+3. Small bundle size
+
+CONSTRAINTS
+- No Three.js/Babylon.js or other engines.
+- WebGPU rendered.
+- Everything procedural: no texture/model/sound files. Sound is synthesized live with the Web Audio API. Deliverable is a single self-contained index.html. Report minified size.
+- Zero per-frame JS allocations (no GC stutter). Preallocate all buffers.
+
+TARGET
+- Windows 11 Home (build 26200), latest Chrome or Edge with WebGPU, RTX 3070 Ti 8GB, Ryzen 7 5700X, 32 GB RAM, 200 Hz monitor
+- 2560x1440 at full resolution. Target a stable 60 fps: GPU frame time <= 16 ms average, 99th percentile <= 20 ms, and no frame > 33 ms during a scripted 60 s fly-through (excluding the initial world-build).
+
+SCENE
+- A vermilion torii gate at the entrance, then a stone-paved approach (sando) lined with stone lanterns and mossy stones
+- Main shrine building as the centrepiece: irimoya roof with a karahafu gable, thick shimenawa rope with white shide paper streamers, a red curtain, wooden steps and an offertory box - all built from simple mathematical shapes
+- A great sacred tree (goshinboku) wrapped with shimenawa, larger than every other tree
+- Dense, towering cedar forest around the shrine grounds, trunks rising out of frame, foliage swaying gently
+- Strong atmosphere: dappled sunlight through the canopy, god rays, drifting light motes and falling leaves; green-gold light near the shrine, deep teal-green fog in the distance
+- A small clear stream beside the approach with animated water, wet rocks and moss
+- Ground cover: ferns, moss, and clusters of purple and blue hydrangea
+- Animated life: butterflies, distant birds, rising dust/pollen particles in the light shafts
+- Set pieces: the torii, the main shrine, the sacred tree, a small stone auxiliary shrine at the forest edge
+- World: bounded, but the boundaries can't be visible from the starting area (hide the edge with forest density, hills and fog)
+
+CONTROLS
+WASD move, mouse look (pointer lock), Q/E down/up, Shift to accelerate, 1-6 jump to the six verification viewpoints
+
+VERIFICATION
+- Visual critic: a separate subagent that sees ONLY your renders, never your code or reasoning. Give it 6 fixed camera poses, rendered at 2560x1440 in GPU-accelerated Chrome, plus a short recording of the fly-through to catch shimmer, aliasing, popping and banding. It returns prioritized, concrete defects. Iterate until it reports nothing above "minor".
+- Performance: GPU timestamp queries plus a frame-time log from the scripted fly-through. Report average, 99th percentile and max.
+
+DONE WHEN: both verification gates pass. Deliver index.html, the bundle size, the perf report and the critic's final review.
