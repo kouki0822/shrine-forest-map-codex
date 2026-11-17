@@ -1,6 +1,6 @@
 # Komorebi — 神社と森のプロシージャルマップ（Codex版）
 
-WebGPUで描く、ブラウザで歩ける神社と森の3Dシーンです。画像・3Dモデル・音声ファイルは一切使わず、地形も社殿も音もすべてコードで生成しています（単一の `index.html`、約87KB）。
+WebGPUで描く、ブラウザで歩ける神社と森の3Dシーンです。画像・3Dモデル・音声ファイルは一切使わず、地形も社殿も音もすべてコードで生成しています（単一の `index.html`、約100KB）。
 
 **▶ Play: https://kouki0822.github.io/shrine-forest-map-codex/**
 
