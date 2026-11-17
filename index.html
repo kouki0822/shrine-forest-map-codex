@@ -29,6 +29,7 @@ select option{background:#102920;color:#eee6c8}
 #cross{position:fixed;left:50%;top:50%;width:4px;height:4px;background:#fff9;border-radius:50%;display:none;pointer-events:none}
 body.locked #cross{display:block}
 body.locked #identity,body.locked #bar,body.locked #top{opacity:.15;transition:opacity 1s}
+body.tree-view #identity{display:none}
 body.hidden #identity,body.hidden #bar,body.hidden #top,body.hidden #status,body.hidden #veil,body.hidden #touchHint{display:none}
 #error{position:fixed;inset:0;display:none;place-items:center;padding:30px;background:#081714f5;z-index:30;overflow:auto}
 #error div{max-width:650px;line-height:1.8}
@@ -96,7 +97,7 @@ body.touch.hidden #menuButton{display:block}
 <div id="error"><div><h2 id="errorTitle">The forest needs WebGPU.</h2><p id="errorText"></p><button id="retry">Reload the forest</button></div></div>
 <script type="module">
 /*
-Komorebi — procedural WebGPU sanctuary, polish revision 3.
+Komorebi — procedural WebGPU sanctuary, polish revision 4.
 
 No external assets, textures, models, libraries, engines, fonts or sounds.
 
@@ -154,13 +155,15 @@ const vp=new Float32Array(16),inverseVP=new Float32Array(16);
 const lightView=new Float32Array(16),lightProjection=new Float32Array(16),lightVP=new Float32Array(16);
 const cpuLog=new Float64Array(MAX_FRAMES),elapsedLog=new Float64Array(MAX_FRAMES),gpuLog=new Float64Array(MAX_FRAMES);
 const submitList=new Array(1),shadowBundles=new Array(1),sceneBundles=new Array(1);
+const SACRED_X=14.3,SACRED_Z=-19.5;
 
-// The approved six camera poses are preserved.
+// Views 1, 2, 3, 5 and 6 retain their camera transforms.
+// View 4 steps back to include the roots and the tree's own lower crown.
 const VIEWS=new Float32Array([
  .8,3.1,36,0,5.4,-22,
  -2.1,2.25,12,0,5,-23,
  6.4,3.7,-10,0,5.2,-25,
- 25,5.4,9.5,11.7,11.2,-12.5,
+ 32.8,7.6,11.5,14.3,16.2,-19.5,
  -8.1,1.75,13.7,-9,0,-5.5,
  27.5,3.4,-18,20.5,2.8,-29
 ]);
@@ -170,8 +173,8 @@ const ROUTE=new Float32Array([
  -8.1,1.75,13.7,-9,0,-5.5,
  -5.7,3.2,-5,0,5.2,-24,
  6.4,3.7,-10,0,5.2,-25,
- 25,5.4,9.5,11.7,11.2,-12.5,
- 20.5,13,-12,11.7,24,-12.5,
+ 32.8,7.6,11.5,14.3,16.2,-19.5,
+ 24,13,-12,14.3,24,-19.5,
  27.5,3.4,-18,20.5,2.8,-29,
  16,7,-40,0,7,-25,
  -8,8,-40,0,6,-25,
@@ -180,7 +183,17 @@ const ROUTE=new Float32Array([
 ]);
 const LANTERNS=new Float32Array([
  -4.7,14,4.7,14,-4.35,4.9,4.7,5.5,
- -4.7,-1,4.7,-1,-4.7,-8,4.7,-8,-8.8,-14,8.8,-14
+ -4.7,-1,4.7,-1,-4.7,-8,4.7,-8,-6.8,-22,6.8,-22
+]);
+// World-space skylight columns: x, z and radius at height 30.
+// The same columns create real openings in the generated canopy.
+const LIGHT_COLUMNS=new Float32Array([
+ -16.8,23.2,1.65,
+ -14.9,4.4,1.35,
+ -8.9,-3.6,1.60,
+ 4.1,-15.6,1.75,
+ -25.5,18.8,1.40,
+ -1.9,-5.6,1.45
 ]);
 let device,adapter,context,format,timestampSupported=false,querySet,queryResolve,queryRead;
 let uniformBuffer,shadowTexture,shadowView,shadowSampler;
@@ -246,6 +259,44 @@ function treeSiteClear(x,z,r){
  }
  return true;
 }
+function lanternFrameClear(x,z){
+ // Reject complete lanterns whose bounding box crosses either side of an
+ // approved 16:9 approach/close-up frame. This runs only while building.
+ const bottom=Math.max(ground(x,z),0),tanY=Math.tan(57*Math.PI/360),tanX=tanY*16/9;
+ for(let cameraIndex=1;cameraIndex<=2;cameraIndex++){
+  const o=cameraIndex*6;
+  let fx=VIEWS[o+3]-VIEWS[o],fy=VIEWS[o+4]-VIEWS[o+1],fz=VIEWS[o+5]-VIEWS[o+2];
+  const length=Math.hypot(fx,fy,fz);fx/=length;fy/=length;fz/=length;
+  const horizontal=Math.hypot(fx,fz),rx=-fz/horizontal,rz=fx/horizontal;
+  const ux=-fx*fy/horizontal,uy=horizontal,uz=-fz*fy/horizontal;
+  let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity,minD=Infinity,maxD=-Infinity;
+  for(let corner=0;corner<8;corner++){
+   const dx=x+((corner&1)?.67:-.67)-VIEWS[o];
+   const dy=bottom+((corner&2)?2.76:-.05)-VIEWS[o+1];
+   const dz=z+((corner&4)?.67:-.67)-VIEWS[o+2];
+   const depth=dx*fx+dy*fy+dz*fz;
+   minD=Math.min(minD,depth);maxD=Math.max(maxD,depth);
+   if(depth>.08){
+    const px=(dx*rx+dz*rz)/(depth*tanX),py=(dx*ux+dy*uy+dz*uz)/(depth*tanY);
+    minX=Math.min(minX,px);maxX=Math.max(maxX,px);minY=Math.min(minY,py);maxY=Math.max(maxY,py);
+   }
+  }
+  if(maxD<=.08)continue;
+  if(minD<=.08)return false;
+  if(maxY<-1||minY>1)continue;
+  if((minX<-1&&maxX>-1)||(minX<1&&maxX>1))return false;
+ }
+ return true;
+}
+function canopyGap(x,y,z,padding=0){
+ if(y<7)return false;
+ const planeX=x-.45/.82*(30-y),planeZ=z+.35/.82*(30-y);
+ for(let i=0;i<LIGHT_COLUMNS.length;i+=3){
+  const dx=planeX-LIGHT_COLUMNS[i],dz=planeZ-LIGHT_COLUMNS[i+1],radius=LIGHT_COLUMNS[i+2]+padding;
+  if(dx*dx+dz*dz<radius*radius)return true;
+ }
+ return false;
+}
 function multiply(out,a,b){
  for(let c=0;c<4;c++)for(let r=0;r<4;r++)
   out[c*4+r]=a[r]*b[c*4]+a[4+r]*b[c*4+1]+a[8+r]*b[c*4+2]+a[12+r]*b[c*4+3];
@@ -272,6 +323,7 @@ function setView(n){
  touring=false;releaseTouches();const o=(n-1)*6;
  cx=VIEWS[o];cy=VIEWS[o+1];cz=VIEWS[o+2];aim(VIEWS[o+3],VIEWS[o+4],VIEWS[o+5]);
  vx=vy=vz=0;viewNumber=n;viewSelect.value=String(n);setMenu(false);
+ document.body.classList.toggle("tree-view",n===4);
  status.textContent="View "+n+" / 6 · "+LEVEL_NAMES[detailLevel]+" detail\n"+renderWidth+" × "+renderHeight+" rendered · "+(timestampSupported?"GPU timestamps available":"GPU timestamps unavailable");
 }
 function catmull(a,b,c,d,t){return .5*((2*b)+(-a+c)*t+(2*a-5*b+4*c-d)*t*t+(-a+3*b-3*c+d)*t*t*t)}
@@ -402,9 +454,9 @@ class Geometry{
 }
 const C={
  wood:[.22,.105,.047],edge:[.38,.18,.075],red:[.58,.065,.025],
- black:[.032,.048,.041],roof:[.054,.079,.073],gold:[.66,.46,.16],
- stone:[.32,.34,.29],moss:[.145,.23,.10],rope:[.56,.43,.21],
- paper:[.91,.91,.79],leaf:[.075,.18,.10],darkLeaf:[.04,.12,.085]
+ black:[.032,.048,.041],roof:[.040,.060,.054],gold:[.66,.46,.16],
+ stone:[.32,.34,.29],moss:[.115,.19,.082],rope:[.56,.43,.21],
+ paper:[.78,.79,.69],leaf:[.075,.18,.10],darkLeaf:[.04,.12,.085]
 };
 let G=new Geometry(),W=new Geometry();
 function tubePath(fn,r,col,mat=7,segments=72,sides=6){
@@ -412,20 +464,24 @@ function tubePath(fn,r,col,mat=7,segments=72,sides=6){
  for(let i=1;i<=segments;i++){const p=fn(i/segments);G.cylinder(...prev,...p,r,r,col,mat,sides);prev=p}
 }
 function paper(x,y,z,scale=1,angle=0){
- const cs=Math.cos(angle),sn=Math.sin(angle),w=.058*scale,thickness=.008*scale;
+ const cs=Math.cos(angle),sn=Math.sin(angle),w=.048*scale,thickness=.012*scale;
  const point=(dx,dy,dz)=>[x+dx*cs+dz*sn,y-dy,z-dx*sn+dz*cs];
  for(let i=0;i<4;i++){
-  const a=i*.185*scale,b=(i+1)*.185*scale;
-  const oa=(i%2?-.083:.083)*scale,ob=(i%2?.083:-.083)*scale;
-  const za=(i%2)*.12*scale,zb=((i+1)%2)*.12*scale;
+  const a=i*.165*scale,b=(i+1)*.165*scale;
+  const oa=(i%2?-.067:.067)*scale,ob=(i%2?.067:-.067)*scale;
+  const za=(i%2)*.14*scale,zb=((i+1)%2)*.14*scale;
   const p=[point(oa-w,a,za),point(oa+w,a,za),point(ob+w,b,zb),point(ob-w,b,zb)];
   const q=[point(oa-w,a,za-thickness),point(oa+w,a,za-thickness),point(ob+w,b,zb-thickness),point(ob-w,b,zb-thickness)];
-  const nx=sn,ny=(i%2?-.22:.22),nz=cs,l=1/Math.hypot(nx,ny,nz),n=[nx*l,ny*l,nz*l];
-  G.quad(p[0],p[1],p[2],p[3],n,C.paper,8,.016,x);
-  G.quad(q[3],q[2],q[1],q[0],[-n[0],-n[1],-n[2]],[.78,.79,.68],8,.016,x);
+  const ax=p[1][0]-p[0][0],ay=p[1][1]-p[0][1],az=p[1][2]-p[0][2];
+  const bx=p[3][0]-p[0][0],by=p[3][1]-p[0][1],bz=p[3][2]-p[0][2];
+  let nx=ay*bz-az*by,ny=az*bx-ax*bz,nz=ax*by-ay*bx;
+  const length=1/Math.hypot(nx,ny,nz);nx*=length;ny*=length;nz*=length;
+  const tint=i%2?.91:1;
+  G.quad(p[0],p[1],p[2],p[3],[nx,ny,nz],[C.paper[0]*tint,C.paper[1]*tint,C.paper[2]*tint],8,.010,x);
+  G.quad(q[3],q[2],q[1],q[0],[-nx,-ny,-nz],[.62,.65,.55],8,.010,x);
   for(let edge=0;edge<4;edge++){
    const next=(edge+1)%4;
-   G.quad(p[edge],q[edge],q[next],p[next],[sn,0,cs],[.71,.72,.61],8,.016,x);
+   G.quad(p[edge],q[edge],q[next],p[next],[sn,0,cs],[.61,.64,.54],8,.010,x);
   }
  }
 }
@@ -434,7 +490,10 @@ function crossRope(x0,x1,y,z,paperScale=1.1){
   const p=t*TAU*21+strand*TAU/3;
   return[mix(x0,x1,t),y-.45*Math.sin(t*Math.PI)+Math.cos(p)*.095,z+Math.sin(p)*.095];
  },.063,C.rope,7,168,5);
- for(let i=0;i<7;i++)paper(mix(x0,x1,(i+1)/8),y-.45*Math.sin((i+1)/8*Math.PI)-.14,z+.12,paperScale);
+ for(let i=0;i<5;i++){
+  const t=(i+1)/6;
+  paper(mix(x0,x1,t),y-.45*Math.sin(t*Math.PI)-.14,z+.12,paperScale*.72,(i%2?-.08:.08));
+ }
  for(let side=-1;side<=1;side+=2){
   const x=side<0?x0:x1;
   for(let i=0;i<7;i++)G.cylinder(x+(i-3)*.025,y-.05,z,x+(i-3)*.043,y-.8-random()*.2,z+.07,.018,.009,C.rope,7,4);
@@ -496,42 +555,75 @@ function foundation(z){
 }
 function offeringBox(){
  const z=-18.94;
- G.box(0,2.03,z,2.36,.90,.94,[.16,.077,.032],1);
- G.box(0,1.67,z,2.55,.14,1.12,C.edge,1);
- for(let i=0;i<8;i++){
-  const a=-1+i*.25+.008,b=a+.234,tint=.88+random()*.20;
-  G.quad([a*1.16,1.71,z+.505],[b*1.16,1.71,z+.505],[b*1.43,2.55,z+.636],[a*1.43,2.55,z+.636],
-   [0,.155,.988],[.31*tint,.16*tint,.069*tint],1);
+ G.box(0,2.06,z,2.20,.75,.82,[.105,.052,.024],1);
+ G.box(0,1.75,z,2.34,.13,.96,[.18,.091,.039],1);
+ for(let i=0;i<10;i++){
+  const a=-1+i*.2+.005,b=a+.186,tint=.82+random()*.24;
+  const topA=a*1.44,topB=b*1.44,bottomA=a*1.06,bottomB=b*1.06;
+  G.quad([bottomA,1.82,z+.455],[bottomB,1.82,z+.455],[topB,2.55,z+.65],[topA,2.55,z+.65],
+   [0,-.258,.966],[.275*tint,.139*tint,.058*tint],1);
  }
- G.box(0,2.60,z,2.99,.16,1.35,[.39,.22,.10],1);
- G.box(0,2.72,z,2.64,.08,1.02,[.024,.020,.014],1);
- for(let i=0;i<13;i++)G.box(-1.28+i*2.56/12,2.80,z,.095,.13,.98,[.34+random()*.04,.20,.085],1);
- G.box(0,2.82,z-.60,3.08,.15,.16,C.edge,1);G.box(0,2.82,z+.60,3.08,.15,.16,C.edge,1);
- for(const x of[-1.47,1.47])G.box(x,2.82,z,.15,.15,1.25,C.edge,1);
- for(const x of[-1.12,1.12]){
-  G.box(x,2.1,z+.61,.105,.76,.07,[.047,.052,.040],3);
-  G.box(x,2.46,z+.65,.22,.085,.08,[.047,.052,.040],3);G.box(x,1.78,z+.53,.22,.085,.08,[.047,.052,.040],3);
-  for(const y of[1.83,2.40])G.rock(x,y,z+.67,.024,.024,.014,[.38,.33,.20],3,8,3,0);
+ for(const side of[-1,1]){
+  G.quad([side*1.06,1.82,z-.44],[side*1.06,1.82,z+.455],[side*1.44,2.55,z+.65],[side*1.44,2.55,z-.65],
+   [side*.89,-.45,0],[.235,.116,.046],1);
+  G.beam(side*1.05,1.79,z+.47,side*1.46,2.58,z+.67,.12,.10,[.12,.062,.026],1);
+  G.beam(side*1.05,1.79,z-.44,side*1.46,2.58,z-.67,.12,.10,[.12,.062,.026],1);
+  G.curve(t=>[side*(.83+.21*t),1.64+.20*Math.sin(t*Math.PI*.5),z+.34+.12*t],
+   t=>.075-.018*t,[.135,.069,.029],1,12,8);
  }
- G.box(0,2.12,z+.65,.75,.56,.065,[.14,.071,.029],1);medallion(0,2.12,z+.694,.205);
- for(const x of[-.88,.88])G.box(x,1.58,z,.24,.20,.75,[.12,.067,.030],1);
+ G.box(0,2.60,z,3.08,.16,1.43,[.32,.173,.069],1);
+ G.box(0,2.71,z,2.79,.08,1.13,[.018,.018,.012],1);
+ for(let i=0;i<15;i++)G.box(-1.34+i*2.68/14,2.79,z,.084,.14,1.02,[.29+random()*.045,.169,.071],1);
+ G.box(0,2.83,z-.65,3.15,.15,.17,C.edge,1);G.box(0,2.83,z+.65,3.15,.15,.17,C.edge,1);
+ for(const x of[-1.51,1.51])G.box(x,2.83,z,.15,.15,1.35,C.edge,1);
+ for(const side of[-1,1]){
+  G.beam(side*1.08,1.88,z+.51,side*1.40,2.48,z+.66,.085,.035,[.042,.049,.039],3);
+  for(const t of[.08,.85]){
+   const x=side*mix(1.08,1.40,t),y=mix(1.88,2.48,t),zz=mix(z+.51,z+.66,t);
+   G.rock(x,y,zz+.025,.027,.027,.012,[.36,.31,.18],3,8,3,0);
+  }
+ }
+ G.box(0,2.16,z+.56,.78,.48,.065,[.13,.065,.027],1);medallion(0,2.16,z+.605,.193);
+ G.curve(t=>[-1.10+t*2.20,1.91-.11*Math.sin(t*Math.PI),z+.485],
+  ()=>.035,[.24,.12,.047],1,24,6);
+ for(const x of[-.87,.87])G.box(x,1.64,z,.28,.18,.82,[.10,.055,.025],1);
 }
 function curtainPanel(x,index){
- const nu=22,nv=12,base=G.v.length/12;
+ const nu=44,nv=18,base=G.v.length/12,frequency=2.6+index*.11,phase=index*.43;
+ const surface=(u,v)=>{
+  const amplitude=.17+.075*v;
+  return[
+   x+(u-.5)*1.60,
+   5.665-v*1.075-.085*Math.sin(u*Math.PI)*v*v,
+   -20.28+amplitude*Math.cos(u*TAU*frequency+phase)+.025*Math.sin(v*Math.PI)
+  ];
+ };
  for(let j=0;j<=nv;j++)for(let i=0;i<=nu;i++){
-  const u=i/nu,v=j/nv,fold=u*TAU*3.5;
-  const xx=x+(u-.5)*1.60,yy=5.665-v*1.035+.035*Math.cos(u*TAU)*v*v;
-  const zz=-20.28+.085*Math.cos(fold)+.018*Math.sin(v*Math.PI)*Math.sin(fold*.5);
-  const slope=-.085*TAU*3.5*Math.sin(fold)/1.60,l=1/Math.hypot(slope,.025,1);
-  G.vertex(xx,yy,zz,-slope*l,.025*l,l,[.53+index*.004,.035,.030],13);
+  const u=i/nu,v=j/nv,p=surface(u,v),a=surface(u+.0005,v),b=surface(u,v+.0005);
+  const ax=a[0]-p[0],ay=a[1]-p[1],az=a[2]-p[2],bx=b[0]-p[0],by=b[1]-p[1],bz=b[2]-p[2];
+  let nx=az*by-ay*bz,ny=ax*bz-az*bx,nz=ay*bx-ax*by;
+  const l=1/Math.hypot(nx,ny,nz);nx*=l;ny*=l;nz*=l;
+  const tint=.94+.055*Math.sin(u*TAU*.7+index);
+  G.vertex(...p,nx,ny,nz,[.49*tint,.032*tint,.027*tint],13);
   if(i<nu&&j<nv){const q=base+j*(nu+1)+i;G.i.push(q,q+1,q+nu+1,q+1,q+nu+2,q+nu+1)}
  }
- const emblemZ=-20.28+.085*Math.cos(.5*TAU*3.5)+.030;
- medallion(x,5.18,emblemZ,.135,[.78,.75,.56],8);
- for(let i=0;i<20;i++){
-  const u=i/20,v=(i+1)/20,yy=u=>4.63+.035*Math.cos(u*TAU);
-  const zz=u=>-20.28+.085*Math.cos(u*TAU*3.5);
-  G.cylinder(x+(u-.5)*1.60,yy(u),zz(u),x+(v-.5)*1.60,yy(v),zz(v),.011,.011,[.39,.032,.023],13,4);
+ const emblemStart=G.v.length,emblemY=5.14;
+ medallion(x,emblemY,-20,.126,[.74,.71,.54],8);
+ for(let k=emblemStart;k<G.v.length;k+=12){
+  const u=clamp((G.v[k]-x)/1.60+.5,0,1),v=clamp((5.665-G.v[k+1])/1.075,0,1);
+  const p=surface(u,v),a=surface(u+.0005,v),b=surface(u,v+.0005);
+  const ax=a[0]-p[0],ay=a[1]-p[1],az=a[2]-p[2],bx=b[0]-p[0],by=b[1]-p[1],bz=b[2]-p[2];
+  let nx=az*by-ay*bz,ny=ax*bz-az*bx,nz=ay*bx-ax*by;
+  const l=1/Math.hypot(nx,ny,nz);nx*=l;ny*=l;nz*=l;
+  G.v[k+2]=p[2]+.017;G.v[k+3]=nx;G.v[k+4]=ny;G.v[k+5]=nz;
+ }
+ for(let i=0;i<32;i++){
+  const a=surface(i/32,1),b=surface((i+1)/32,1);
+  G.cylinder(...a,...b,.016,.016,[.31,.024,.020],13,5);
+ }
+ for(const u of[.04,.96]){
+  const a=surface(u,0),b=surface(u,1);
+  G.cylinder(...a,...b,.007,.007,[.39,.028,.021],13,4);
  }
 }
 function mainShrine(){
@@ -545,20 +637,42 @@ function mainShrine(){
  G.box(0,3.75,z-4.15,11.3,4.2,.19,C.wood,1);
  for(const x of[-5.6,5.6])G.box(x,3.6,z,.18,3.9,8.3,C.wood,1);
  for(let x=-5.3;x<=5.3;x+=.39)G.box(x,3.55,z-4.3,.065,3.6,.08,C.edge,1);
- G.box(0,3.62,z+3.12,11.1,3.95,.16,[.035,.031,.020],1);
+ G.box(0,3.62,z+3.04,11.1,3.95,.16,[.024,.025,.017],1);
  for(const panelX of[-3.55,0,3.55]){
   const central=panelX===0;
-  G.box(panelX,3.48,z+3.28,3.2,3.65,.12,central?[.085,.057,.029]:[.19,.17,.115],1);
-  G.box(panelX,2.24,z+3.50,3,1.08,.15,[.27,.14,.059],1);
-  for(let i=0;i<5;i++)G.box(panelX-1.2+i*.6,2.24,z+3.60,.025,.92,.035,C.edge,1);
-  for(const side of[-1,1])G.box(panelX+side*1.59,3.47,z+3.64,.15,3.8,.24,C.edge,1);
-  for(const yy of[1.70,2.83,5.25])G.box(panelX,yy,z+3.66,3.28,.12,.21,C.edge,1);
-  const verticals=central?7:11,horizontals=central?4:6;
-  for(let i=0;i<verticals;i++)G.box(panelX-1.4+i*2.8/(verticals-1),4.02,z+3.61,.048,2.16,.17,[.38,.23,.107],1);
-  for(let i=0;i<horizontals;i++)G.box(panelX,3.05+i*1.90/(horizontals-1),z+3.70,2.98,.041,.09,[.34,.20,.090],1);
-  if(central)G.box(0,3.98,z+3.75,.13,2.3,.14,C.edge,1);
+  G.box(panelX,3.48,z+3.21,3.2,3.65,.12,central?[.065,.045,.024]:[.16,.145,.098],1);
+  G.box(panelX,2.24,z+3.48,3,1.08,.19,[.245,.122,.051],1);
+  for(let i=0;i<5;i++)G.box(panelX-1.2+i*.6,2.24,z+3.61,.025,.92,.045,C.edge,1);
+  for(const side of[-1,1])G.box(panelX+side*1.59,3.47,z+3.69,.17,3.8,.31,C.edge,1);
+  for(const yy of[1.70,2.83,5.25])G.box(panelX,yy,z+3.71,3.28,.14,.26,C.edge,1);
+  if(central){
+   for(const door of[-1,1]){
+    const center=panelX+door*.77;
+    G.box(center,3.91,z+3.38,1.39,1.98,.08,[.115,.106,.070],1);
+    for(let i=0;i<5;i++)G.box(center-.55+i*.275,3.92,z+3.76,.055,2.05,.20,[.34,.195,.083],1);
+    for(const yy of[3.18,4.43])G.box(center,yy,z+3.86,1.43,.075,.12,C.edge,1);
+    for(let i=0;i<3;i++){
+     const xx=center-.44+i*.44;
+     G.beam(xx-.19,4.62,z+3.84,xx+.19,4.97,z+3.84,.034,.075,C.edge,1);
+     G.beam(xx+.19,4.62,z+3.89,xx-.19,4.97,z+3.89,.034,.075,C.edge,1);
+    }
+   }
+   G.box(0,3.97,z+3.91,.14,2.35,.20,[.25,.127,.050],1);
+  }else{
+   for(let i=0;i<8;i++){
+    const xx=panelX-1.30+i*.37;
+    G.box(xx,3.86,z+3.71,.065,1.92,.25,[.34,.20,.087],1);
+    if(i%3===0)G.box(xx+.095,3.86,z+3.79,.031,1.92,.18,[.28,.153,.061],1);
+   }
+   G.box(panelX,4.37,z+3.88,3.03,.105,.17,C.edge,1);
+   G.box(panelX,4.95,z+3.55,2.96,.42,.10,[.095,.076,.041],1);
+   for(let i=0;i<6;i++){
+    const xx=panelX-1.20+i*.48;
+    G.beam(xx-.21,4.76,z+3.81,xx+.21,5.13,z+3.81,.040,.095,C.edge,1);
+   }
+  }
  }
- for(const x of[-.17,.17])G.rock(x,3.03,z+3.82,.045,.065,.035,C.gold,3,8,4,0);
+ for(const x of[-.17,.17])G.rock(x,3.03,z+4.02,.045,.065,.035,C.gold,3,8,4,0);
  G.box(0,5.49,z+3.54,11.2,.25,.15,[.17,.093,.041],1);
  for(let i=0;i<18;i++){
   const x=-5.18+i*.61;
@@ -588,29 +702,39 @@ function mainShrine(){
  crossRope(-4.7,4.7,5.78,-19.69);offeringBox();
  for(let strand=0;strand<2;strand++)tubePath(t=>[Math.sin(t*TAU*22+strand*Math.PI)*.035,5.2-t*2.1,-19.45+Math.cos(t*TAU*22+strand*Math.PI)*.035],.026,C.rope,7,85,4);
  G.rock(0,5.45,-19.45,.19,.23,.19,C.gold,3,10,6,0);
+ const lowerRoofY=t=>7.63-1.43*t;
  for(const side of[-1,1]){
   G.patch((u,v)=>[(u-.5)*12.4,10.16-2.62*Math.pow(v,.79)+.15*Math.pow(v,8),z+side*3.65*v],50,18,C.roof,3);
-  G.patch((u,v)=>[(u-.5)*2*(6.2+2.05*v),7.63-1.75*Math.pow(v,.78)+.32*Math.pow(v,8),z+side*(3.65+3.25*v)],60,16,C.roof,3);
-  roofLine(t=>[-8.25+t*16.5,6.20,z+side*6.9],60,.085);
-  G.box(0,6.04,z+side*6.88,16.5,.25,.19,[.105,.070,.034],1);
+  G.patch((u,v)=>[(u-.5)*2*(6.2+2.05*v),lowerRoofY(v),z+side*(3.65+3.25*v)],60,16,C.roof,3);
+  roofLine(t=>[-8.25+t*16.5,6.24,z+side*6.9],60,.075);
+  G.box(0,6.13,z+side*6.9,16.5,.20,.22,[.085,.062,.032],1);
   const ribs=Math.round(40*detail.tess);
   for(let i=0;i<ribs;i++){
    const xx=-6.1+i*12.2/(ribs-1);
    roofLine(t=>[xx,10.19-2.62*Math.pow(t,.79)+.15*Math.pow(t,8),z+side*3.65*t],12,.024,[.10,.135,.12]);
   }
-  G.patch((u,v)=>[side*(6.2+2.05*v),7.63-1.75*Math.pow(v,.78)+.32*Math.pow(v,8),z+(u-.5)*2*(3.65+3.25*v)],28,16,C.roof,3);
-  G.box(side*8.22,6.04,z,.19,.25,13.6,[.105,.070,.034],1);
-  for(let row=1;row<=10;row++){
-   const t=row/10,yy=7.65-1.75*Math.pow(t,.78)+.32*Math.pow(t,8),hw=6.2+2.05*t,hd=3.65+3.25*t;
-   G.beam(-hw,yy,z+side*hd,hw,yy,z+side*hd,.035,.045,[.045,.063,.057],3);
-   G.beam(side*hw,yy,z-hd,side*hw,yy,z+hd,.035,.045,[.045,.063,.057],3);
+  // Straight rigid hip facets replace the sagging, curtain-like skirt.
+  G.patch((u,v)=>[side*(6.2+2.05*v),lowerRoofY(v),z+(u-.5)*2*(3.65+3.25*v)],32,14,C.roof,3);
+  G.box(side*8.25,6.13,z,.22,.20,13.8,[.085,.062,.032],1);
+  for(let row=1;row<=12;row++){
+   const t=row/12,yy=lowerRoofY(t)+.033,hw=6.2+2.05*t,hd=3.65+3.25*t;
+   G.beam(-hw,yy,z+side*hd,hw,yy,z+side*hd,.045,.055,[.033,.049,.044],3);
+   G.beam(side*hw,yy,z-hd,side*hw,yy,z+hd,.045,.055,[.033,.049,.044],3);
+  }
+  for(let i=0;i<13;i++){
+   const f=-.94+i*1.88/12;
+   roofLine(t=>[side*(6.2+2.05*t),lowerRoofY(t)+.055,z+f*(3.65+3.25*t)],18,.030,[.070,.092,.079]);
+  }
+  for(const zz of[z-5.5,z-2.7,z,z+2.7,z+5.5]){
+   G.beam(side*6.12,6.19,zz,side*7.90,6.12,zz,.13,.16,C.wood,1);
+   G.beam(side*6.15,5.82,zz,side*7.55,6.12,zz,.10,.11,C.edge,1);
   }
   G.quad([side*6.16,7.55,z-3.65],[side*6.16,7.55,z+3.65],[side*6.16,10.02,z],[side*6.16,10.02,z],[side,0,0],C.wood,1);
   for(let j=0;j<7;j++)G.box(side*6.20,7.8+j*.28,z,.12,.075,6.1-j*.72,C.edge,1);
   roofLine(t=>[side*6.23,10.15-2.55*t,z+3.65*t],20,.065,C.edge);
   roofLine(t=>[side*6.23,10.15-2.55*t,z-3.65*t],20,.065,C.edge);
-  roofLine(t=>[side*(6.2+2.05*t),7.65-1.75*Math.pow(t,.78)+.32*Math.pow(t,8),z-3.65-3.25*t],20,.065);
-  roofLine(t=>[side*(6.2+2.05*t),7.65-1.75*Math.pow(t,.78)+.32*Math.pow(t,8),z+3.65+3.25*t],20,.065);
+  roofLine(t=>[side*(6.2+2.05*t),lowerRoofY(t)+.04,z-3.65-3.25*t],20,.065);
+  roofLine(t=>[side*(6.2+2.05*t),lowerRoofY(t)+.04,z+3.65+3.25*t],20,.065);
  }
  G.box(0,10.23,z,12.8,.24,.40,C.black,3);G.box(0,10.39,z,13,.09,.48,C.gold,3);
  for(const x of[-6.5,6.5])roofLine(t=>[x+(x<0?-1:1)*t*.4,10.35+t*t*.75,z],12,.10,C.gold);
@@ -636,6 +760,7 @@ function mainShrine(){
  for(let i=-2;i<=2;i++)G.box(i*.9,6.75,-16.99,.10,.38,.13,C.edge,1);
 }
 function lantern(x,z){
+ if(!lanternFrameClear(x,z))return;
  const y=Math.max(ground(x,z),0);
  G.box(x,y+.10,z,.86,.20,.86,[.28,.32,.28],2);G.box(x,y+.25,z,.68,.12,.68,C.stone,2);
  G.cylinder(x,y+.28,z,x,y+1.13,z,.25,.18,C.stone,2,4);
@@ -661,48 +786,75 @@ function auxiliary(){
  }
  G.quad([x-1.38,y+2.61,z+1.05],[x+1.38,y+2.61,z+1.05],[x,y+3.55,z+1.05],[x,y+3.55,z+1.05],[0,0,1],[.28,.31,.25],2);
  G.box(x,y+3.77,z,.24,.14,2.9,C.black,3);medallion(x,y+2.96,z+1.075,.19,[.57,.51,.32]);
- G.box(x,y+.93,z+.18,.68,.14,.48,[.27,.30,.25],2);
- G.box(x,y+1.27,z+.12,.34,.48,.19,[.23,.27,.235],14);
- G.quad([x-.17,y+1.51,z+.221],[x+.17,y+1.51,z+.221],[x+.10,y+1.67,z+.221],[x-.10,y+1.67,z+.221],[0,0,1],[.28,.31,.27],14);
- G.rock(x,y+1.30,z+.228,.112,.119,.012,[.13,.17,.145],14,12,5,0);
- medallion(x,y+1.30,z+.242,.087,[.37,.40,.32],14);
- G.beam(x-.145,y+1.06,z+.23,x-.145,y+1.48,z+.23,.018,.012,[.35,.38,.31],14);
- G.beam(x+.145,y+1.06,z+.23,x+.145,y+1.48,z+.23,.018,.012,[.35,.38,.31],14);
- G.rock(x+.12,y+1.07,z+.24,.10,.035,.025,C.moss,0,7,3,.10);
+ G.box(x,y+.93,z+.18,.86,.14,.57,[.24,.28,.23],2);
+ G.box(x,y+1.38,z+.13,.62,.75,.25,[.19,.225,.19],14);
+ G.quad([x-.31,y+1.755,z+.263],[x+.31,y+1.755,z+.263],[x+.17,y+1.94,z+.263],[x-.17,y+1.94,z+.263],[0,0,1],[.24,.275,.22],14);
+ for(const side of[-1,1]){
+  G.beam(x+side*.26,y+1.08,z+.285,x+side*.26,y+1.72,z+.285,.038,.025,[.31,.34,.265],14);
+ }
+ G.beam(x-.25,y+1.08,z+.285,x+.25,y+1.08,z+.285,.040,.025,[.31,.34,.265],14);
+ G.rock(x,y+1.47,z+.28,.222,.245,.050,[.105,.14,.115],14,18,8,.06);
+ medallion(x,y+1.48,z+.337,.170,[.39,.405,.29],14);
+ for(let i=0;i<5;i++){
+  const angle=i*TAU/5+Math.PI*.5;
+  const dx=Math.cos(angle),dy=Math.sin(angle);
+  G.rock(x+dx*.20,y+1.47+dy*.21,z+.293,.030,.040,.020,[.27,.30,.23],14,8,4,.15);
+ }
+ G.rock(x+.16,y+1.08,z+.31,.17,.045,.065,C.moss,0,9,4,.12);
  G.rock(x-.8,y+2.85,z+.7,.48,.045,.35,C.moss,0,9,3,.10);
  for(let i=0;i<5;i++)G.box(x,y+.08,z+1.65+i*.5,1.8,.16,.43,[.35,.37,.31],2);
- for(let i=0;i<3;i++)paper(x+(i-1)*.45,y+2.4,z+.81,.55);
+ // Hanging paper belongs to the rope across the dark opening, not the face.
+ for(let strand=0;strand<2;strand++)tubePath(t=>{
+  const a=t*TAU*17+strand*Math.PI;
+  return[x-.89+t*1.78,y+2.40-.115*Math.sin(t*Math.PI)+Math.cos(a)*.018,z+1.04+Math.sin(a)*.018];
+ },.022,C.rope,7,70,5);
+ for(const side of[-1,1]){
+  G.box(x+side*.91,y+2.40,z+.99,.12,.11,.16,C.wood,1);
+  paper(x+side*.28,y+2.25,z+1.065,.43,side*.14);
+ }
 }
 function fern(x,z,size=1){
- const y=ground(x,z)+.015,phase=random()*TAU,fronds=detail.leaflets;
+ const y=ground(x,z)+.015,phase=random()*TAU,fronds=detail.leaflets+1;
  for(let j=0;j<fronds;j++){
-  const a=phase+j*TAU/fronds,dx=Math.cos(a),dz=Math.sin(a),len=size*(.6+random()*.45);
-  for(let k=0;k<detail.leaflets;k++){
-   const t=.12+k*.81/detail.leaflets,next=t+.16;
-   const px=x+dx*t*len,pz=z+dz*t*len,yy=y+Math.sin(t*Math.PI*.83)*len*.53;
-   const tipx=x+dx*next*len,tipz=z+dz*next*len,tipy=y+Math.sin(next*Math.PI*.83)*len*.53;
-   const w=Math.sin(t*Math.PI)*len*.20,col=[.075+k*.004,.155+k*.008,.082+k*.004];
+  const a=phase+j*TAU/fronds+(random()-.5)*.28,dx=Math.cos(a),dz=Math.sin(a),len=size*(.64+random()*.36);
+  const path=t=>[x+dx*t*len,y+Math.sin(t*Math.PI*.83)*len*.58,z+dz*t*len];
+  const sections=detail.leaflets+2;
+  for(let k=0;k<sections;k++){
+   const t=.08+k*.84/sections,next=t+.84/sections,p=path(t),tip=path(Math.min(1,next));
+   G.cylinder(...p,...tip,.006*size,.004*size,[.11,.18,.075],4,4,.025);
+   if(k===0)continue;
+   const leafLength=(.045+.13*Math.sin(t*Math.PI))*size,leafWidth=leafLength*.23;
    for(const side of[-1,1]){
-    const qx=px+dx*.12*len-dz*w*side,qz=pz+dz*.12*len+dx*w*side;
-    G.quad([px,yy,pz],[qx,yy+.025,qz],[tipx,tipy,tipz],[px+dx*.03,yy+.012,pz+dz*.03],[0,.9,.25],col,4,.04,x+z);
+    const lx=dx*.35-dz*side*.94,lz=dz*.35+dx*side*.94;
+    const end=[p[0]+lx*leafLength,p[1]+.045*size,p[2]+lz*leafLength];
+    const middle=[p[0]+lx*leafLength*.51,p[1]+.049*size,p[2]+lz*leafLength*.51];
+    const left=[middle[0]-lz*leafWidth,middle[1]-.014*size,middle[2]+lx*leafWidth];
+    const right=[middle[0]+lz*leafWidth,middle[1]-.014*size,middle[2]-lx*leafWidth];
+    const col=[.060+k*.003,.125+k*.007,.065+k*.003];
+    G.quad(p,left,end,middle,[-lz*.18,.90,lx*.18],col,4,.028,x+z);
+    G.quad(p,middle,end,right,[lz*.18,.90,-lx*.18],[col[0]*.84,col[1]*.91,col[2]*.89],4,.028,x+z);
    }
   }
  }
 }
 function flowerPetal(px,py,pz,dx,dy,dz,sx,sy,sz,nx,ny,nz,size,col,seedValue){
  const cx=px+dx*size*.66,cy=py+dy*size*.66,cz=pz+dz*size*.66;
- const center=G.vertex(cx+nx*size*.34,cy+ny*size*.34,cz+nz*size*.34,nx,ny,nz,[col[0]*.83,col[1]*.83,col[2]*.86],9,.017,seedValue);
+ const center=G.vertex(cx+nx*size*.27,cy+ny*size*.27,cz+nz*size*.27,nx,ny,nz,[col[0]*.81,col[1]*.83,col[2]*.86],9,.017,seedValue);
  const ring=G.v.length/12,steps=7;
  for(let k=0;k<steps;k++){
   const a=k/steps*TAU,along=Math.cos(a)*size*.68,across=Math.sin(a)*size*.43;
-  const lift=(.055+.05*Math.cos(a*3))*size,shade=.93+.12*Math.sin(a+seedValue);
+  const lift=(.035+.065*Math.cos(a*3+seedValue))*size,shade=.88+.17*Math.sin(a+seedValue);
+  let qx=nx+dx*Math.cos(a)*.32+sx*Math.sin(a)*.32;
+  let qy=ny+dy*Math.cos(a)*.32+sy*Math.sin(a)*.32;
+  let qz=nz+dz*Math.cos(a)*.32+sz*Math.sin(a)*.32;
+  const l=1/Math.hypot(qx,qy,qz);qx*=l;qy*=l;qz*=l;
   G.vertex(cx+dx*along+sx*across+nx*lift,cy+dy*along+sy*across+ny*lift,cz+dz*along+sz*across+nz*lift,
-   nx,ny,nz,[col[0]*shade,col[1]*shade,col[2]*shade],9,.017,seedValue);
+   qx,qy,qz,[col[0]*shade,col[1]*shade,col[2]*shade],9,.017,seedValue);
  }
  for(let k=0;k<steps;k++)G.tri(center,ring+k,ring+(k+1)%steps);
 }
 function hydrangea(x,z,s=1){
- const y=ground(x,z);G.rock(x,y+.37*s,z,.60*s,.40*s,.57*s,[.055,.14,.080],4,9,5,.08);
+ const y=ground(x,z);G.rock(x,y+.37*s,z,.60*s,.40*s,.57*s,[.055,.14,.080],4,11,6,.14);
  const leaves=Math.round(12*detail.tess);
  for(let k=0;k<leaves;k++){
   const a=random()*TAU,r=random()*.5*s,xx=x+Math.cos(a)*r,zz=z+Math.sin(a)*r;
@@ -711,63 +863,135 @@ function hydrangea(x,z,s=1){
   G.quad(base,[xx+Math.cos(a+.85)*w,yy+.05,zz+Math.sin(a+.85)*w],tip,mid,[.1,.85,.2],[.065,.16,.09],4,.03,x);
   G.quad(base,mid,tip,[xx+Math.cos(a-.85)*w,yy+.05,zz+Math.sin(a-.85)*w],[.1,.95,-.1],[.08,.18,.10],4,.03,x);
  }
- for(let c=0;c<3;c++){
-  const a=c*TAU/3,xx=x+Math.cos(a)*.32*s,zz=z+Math.sin(a)*.32*s,yy=y+(.77+random()*.23)*s,choice=random();
-  const flowerColor=choice<.43?[.26,.40,.69]:choice<.83?[.61,.35,.52]:[.76,.79,.68];
-  G.cylinder(xx,y+.25*s,zz,xx,yy,zz,.022,.016,C.leaf,4,5);
-  // Recessed green receptacle, rather than a visible smooth colored sphere.
-  G.rock(xx,yy-.025*s,zz,.215*s,.19*s,.215*s,[.105,.145,.09],4,8,5,.12);
+ const variety=random(),headCount=2+(random()>.42?1:0);
+ for(let c=0;c<headCount;c++){
+  const a=c*TAU/headCount+random()*.45,headScale=.74+random()*.40;
+  const xx=x+Math.cos(a)*(.20+random()*.20)*s,zz=z+Math.sin(a)*(.20+random()*.20)*s;
+  const yy=y+(.72+random()*.30)*s,choice=fract(variety+c*.13);
+  const flowerColor=choice<.43?[.26,.40,.65]:choice<.83?[.57,.32,.46]:[.70,.74,.63];
+  const rx=(.28+random()*.10)*s*headScale,rz=(.25+random()*.12)*s*headScale,ry=(.15+random()*.13)*s*headScale;
+  const phase=random()*TAU;
+  G.cylinder(xx-.07*s,y+.25*s,zz+.05*s,xx,yy,zz,.022,.012,C.leaf,4,5);
+  G.rock(xx,yy-.055*s,zz,rx*.62,ry*.60,rz*.62,[.095,.135,.082],4,9,5,.16);
   for(let f=0;f<detail.florets;f++){
-   const az=f*2.399963,ny=-.34+(f+.5)/detail.florets*1.34,nr=Math.sqrt(1-ny*ny);
+   const az=f*2.399963+phase+(random()-.5)*.21;
+   const ny=-.16+(f+.5)/detail.florets*1.16,nr=Math.sqrt(Math.max(0,1-ny*ny));
    const nx=Math.cos(az)*nr,nz=Math.sin(az)*nr;
    let ux=-nz,uy=0,uz=nx,l=1/Math.max(.001,Math.hypot(ux,uy,uz));ux*=l;uz*=l;
    const vx=ny*uz-nz*uy,vy=nz*ux-nx*uz,vz=nx*uy-ny*ux;
-   const radial=.30+random()*.075,px=xx+nx*radial*s,py=yy+ny*(.26+random()*.055)*s,pz=zz+nz*radial*s;
-   const size=(.052+random()*.020)*s*(detailLevel===0?1.20:1);
-   for(let petal=0;petal<4;petal++){
-    const angle=petal*TAU/4+az+(random()-.5)*.13,co=Math.cos(angle),si=Math.sin(angle);
-    const dx=ux*co+vx*si,dy=uy*co+vy*si,dz=uz*co+vz*si;
-    const sx=-ux*si+vx*co,sy=-uy*si+vy*co,sz=-uz*si+vz*co,tint=.78+random()*.35;
-    flowerPetal(px,py,pz,dx,dy,dz,sx,sy,sz,nx,ny,nz,size,[flowerColor[0]*tint,flowerColor[1]*tint,flowerColor[2]*tint],x+z+f);
+   const lobe=.81+.15*Math.sin(az*3+phase)+random()*.20;
+   const px=xx+nx*rx*lobe,py=yy+ny*ry*(.83+random()*.30),pz=zz+nz*rz*lobe;
+   const size=(.046+random()*.027)*s*headScale*(detailLevel===0?1.17:1);
+   const aging=random(),blush=.85+.18*ny+.18*Math.sin(az+phase);
+   const localColor=[
+    flowerColor[0]*blush+aging*.026,
+    flowerColor[1]*(.82+aging*.24),
+    flowerColor[2]*(.83+.20*ny)+aging*.025
+   ];
+   if(f%9===0){
+    G.rock(px,py,pz,.023*s,.027*s,.024*s,[localColor[0]*.73,localColor[1]*.79,localColor[2]*.74],9,7,4,.13);
+    continue;
    }
-   const q=.011*s,co=[.59,.60,.39];
-   G.quad([px+ux*q,py+uy*q,pz+uz*q],[px+vx*q,py+vy*q,pz+vz*q],[px-ux*q,py-uy*q,pz-uz*q],[px-vx*q,py-vy*q,pz-vz*q],[nx,ny,nz],co,9,.017,x+z);
+   for(let petal=0;petal<4;petal++){
+    const angle=petal*TAU/4+az+(random()-.5)*.25,co=Math.cos(angle),si=Math.sin(angle);
+    const dx=ux*co+vx*si,dy=uy*co+vy*si,dz=uz*co+vz*si;
+    const sx=-ux*si+vx*co,sy=-uy*si+vy*co,sz=-uz*si+vz*co,tint=.76+random()*.31;
+    flowerPetal(px,py,pz,dx,dy,dz,sx,sy,sz,nx,ny,nz,size*(.85+random()*.27),
+     [localColor[0]*tint,localColor[1]*tint,localColor[2]*tint],x+z+f);
+   }
+   G.rock(px+nx*.008*s,py+ny*.008*s,pz+nz*.008*s,.010*s,.010*s,.010*s,[.43,.48,.28],9,6,3,.05);
   }
+ }
+}
+function crownTuft(x,y,z,rx,ry,rz,angle,col,wind){
+ // Closed, irregular 3D needle masses, with no star cards or cone tiers.
+ const padding=Math.max(rx,rz)*.78+ry*.46;
+ if(canopyGap(x,y,z,padding))return;
+ const sides=10+detailLevel*4,rings=6+detailLevel*2,base=G.v.length/12;
+ const phase=random()*TAU,cs=Math.cos(angle),sn=Math.sin(angle),tilt=(random()-.5)*.30;
+ const ct=Math.cos(tilt),st=Math.sin(tilt);
+ for(let j=0;j<=rings;j++){
+  const theta=j/rings*Math.PI,vertical=Math.cos(theta),radial=Math.sin(theta);
+  for(let k=0;k<=sides;k++){
+   const a=k/sides*TAU,lx=Math.cos(a)*radial,lz=Math.sin(a)*radial;
+   const shape=1+.105*Math.sin(a*3+theta*2+phase)+.064*Math.sin(a*5-theta*3+phase*.47);
+   const xx=lx*rx*shape,yy=vertical*ry*(1+.07*Math.sin(a*2+phase)),zz=lz*rz*shape;
+   const tiltedX=xx*ct-yy*st,tiltedY=xx*st+yy*ct;
+   let nx=lx/rx,ny=vertical/ry,nz=lz/rz;
+   const tn=nx*ct-ny*st;ny=nx*st+ny*ct;nx=tn;
+   const wx=nx*cs-nz*sn,wz=nx*sn+nz*cs,nl=1/Math.hypot(wx,ny,wz);
+   const tint=.77+.20*(vertical*.5+.5)+.07*Math.sin(a*3+phase);
+   G.vertex(x+tiltedX*cs-zz*sn,y+tiltedY,z+tiltedX*sn+zz*cs,wx*nl,ny*nl,wz*nl,
+    [col[0]*tint,col[1]*tint,col[2]*tint],4,wind,x+z+phase);
+   if(j<rings&&k<sides){
+    const q=base+j*(sides+1)+k;
+    G.i.push(q,q+1,q+sides+1,q+1,q+sides+2,q+sides+1);
+   }
+  }
+ }
+ // Sparse, narrow terminal sprays break the otherwise solid silhouette.
+ const sprays=3+detailLevel*2;
+ for(let i=0;i<sprays;i++){
+  const a=random()*TAU,t=.25+random()*.65,rr=Math.sqrt(1-t*t);
+  const px=x+Math.cos(a)*rx*rr,py=y+t*ry,pz=z+Math.sin(a)*rz*rr;
+  if(canopyGap(px,py,pz,.22))continue;
+  const dx=Math.cos(a),dz=Math.sin(a),length=.15+random()*.19,width=.018+random()*.011;
+  const root=[px-dx*.045,py-.025,pz-dz*.045],tip=[px+dx*length,py+.07,pz+dz*length];
+  const mid=[px+dx*length*.43,py+.065,pz+dz*length*.43];
+  G.quad(root,[mid[0]-dz*width,mid[1]-.018,mid[2]+dx*width],tip,mid,[dx*.18,.88,dz*.18],col,4,wind,x+z);
+  G.quad(root,mid,tip,[mid[0]+dz*width,mid[1]-.018,mid[2]-dx*width],[-dx*.18,.88,-dz*.18],
+   [col[0]*.86,col[1]*.90,col[2]*.91],4,wind,x+z);
  }
 }
 function bough(x,y,z,a,len,col,wind){
- const dx=Math.cos(a),dz=Math.sin(a),sx=-dz,sz=dx,phase=random()*TAU;
- for(let j=0;j<detail.fans;j++){
-  const t=(j+.15+random()*.25)/detail.fans,w=(1-t)*len*(.20+random()*.13);
-  const roll=Math.sin(phase+j*2.17)*.82,vertical=Math.sin(roll),horizontal=Math.cos(roll);
-  const yy=y+Math.sin(t*Math.PI)*len*.16-t*len*.12;
-  const px=x+dx*t*len,pz=z+dz*t*len;
-  for(const side of[-1,1]){
-   const base=[px,yy,pz],edge=[px+dx*len*.17+sx*w*side*horizontal,yy+vertical*w*side-.04,pz+dz*len*.17+sz*w*side*horizontal];
-   const tip=[px+dx*len*.34+sx*w*.31*side,yy-.06+vertical*w*.30*side,pz+dz*len*.34+sz*w*.31*side];
-   const ridge=[px+dx*len*.16+sx*w*.23*side,yy+.09,pz+dz*len*.16+sz*w*.23*side];
-   const tint=.85+random()*.22,c=[col[0]*tint,col[1]*tint,col[2]*tint];
-   G.quad(base,edge,tip,ridge,[sx*.20*side,.78,sz*.20*side],c,4,wind,x+z);
-   G.quad(base,ridge,tip,[px+dx*len*.20,yy-.07,pz+dz*len*.20],[dx*.22,.64,dz*.22],[c[0]*.83,c[1]*.88,c[2]*.92],4,wind,x+z);
-  }
+ const dx=Math.cos(a),dz=Math.sin(a),sx=-dz,sz=dx;
+ const lift=(random()-.5)*.50,terminalY=y+lift-len*.09;
+ G.cylinder(x,y,z,x+dx*len*.91,terminalY,z+dz*len*.91,.055+len*.018,.014,C.wood,10,6);
+ const clusters=2+detailLevel;
+ for(let j=0;j<clusters;j++){
+  const t=.43+j*.52/Math.max(1,clusters-1),side=(j%2?1:-1);
+  const offset=side*len*(.07+random()*.10),scale=.70+random()*.42;
+  crownTuft(x+dx*len*t+sx*offset,y+lift*t-len*t*.08+(random()-.5)*.45,
+   z+dz*len*t+sz*offset,
+   len*(.22+random()*.09)*scale,len*(.15+random()*.13)*scale,len*(.15+random()*.12)*scale,
+   a+(random()-.5)*.65,col,wind);
  }
 }
 function trunkMesh(x,y,z,h,r,leanX,leanZ,bark,sacred){
- const sides=sacred?Math.max(56,Math.round(96*detail.tess)):Math.max(12,Math.round(18*detail.tess));
- const rings=detail.trunkSegments+(sacred?16:0),base=G.v.length/12,phase=random()*TAU;
+ const sides=sacred?Math.max(80,Math.round(128*detail.tess)):Math.max(14,Math.round(22*detail.tess));
+ const rings=detail.trunkSegments+(sacred?25:3),base=G.v.length/12,phase=random()*TAU;
+ const furrows=[],knots=[];
+ for(let i=0;i<(sacred?23:8);i++){
+  furrows.push({
+   angle:random()*TAU,width:.022+random()*.095,depth:.015+random()*(sacred?.085:.040),
+   drift:(random()-.5)*.22,start:random()*.22-.12,end:.30+random()*.78,phase:random()*TAU
+  });
+ }
+ for(let i=0;i<(sacred?8:2);i++)knots.push({angle:random()*TAU,t:.055+random()*.42,width:.11+random()*.15});
  const radius=(a,t)=>{
-  const buttress=Math.pow(.5+.5*Math.cos(a*6+phase),4)*.26*Math.exp(-t*42);
-  const furrow=sacred?-.035*Math.pow(.5+.5*Math.sin(a*31+.28*Math.sin(t*39)+phase),5):-.019*Math.pow(.5+.5*Math.sin(a*11+t*9+phase),4);
-  const irregular=1+.040*Math.sin(a*5+t*9+phase)+.022*Math.sin(a*9-t*5)+furrow;
-  return(r*Math.pow(1-t,.72)+.055)*irregular*(1+.26*Math.exp(-t*36)+buttress);
+  let irregular=1+.047*Math.sin(a*3+t*8+phase)+.022*Math.sin(a*7-t*11+phase*.6);
+  for(const f of furrows){
+   const center=f.angle+f.drift*Math.sin(t*11+f.phase)+.025*Math.sin(t*43+f.phase);
+   const angular=Math.atan2(Math.sin(a-center),Math.cos(a-center))/f.width;
+   const start=smooth(clamp((t-f.start)/.055,0,1)),end=1-smooth(clamp((t-f.end)/.09,0,1));
+   irregular-=f.depth*Math.exp(-angular*angular)*start*end;
+  }
+  for(const knot of knots){
+   const angle=Math.atan2(Math.sin(a-knot.angle),Math.cos(a-knot.angle))/knot.width;
+   const height=(t-knot.t)/.024;
+   irregular+=.070*Math.exp(-angle*angle-height*height);
+  }
+  const buttress=(.5+.5*Math.sin(a*3+phase+.34*Math.sin(a*2)))*.22*Math.exp(-t*37);
+  return(r*Math.pow(Math.max(0,1-t),.72)+.055)*irregular*(1+.23*Math.exp(-t*36)+buttress);
  };
  for(let j=0;j<=rings;j++){
   const t=j/rings,centerX=x+leanX*t*t,centerZ=z+leanZ*t*t;
   for(let k=0;k<=sides;k++){
-   const a=k/sides*TAU,cs=Math.cos(a),sn=Math.sin(a),rr=radius(a,t),dr=(radius(a+.001,t)-radius(a-.001,t))/.002;
-   const slope=.72*r/h*Math.pow(Math.max(.02,1-t),-.28);
-   let nx=cs+dr/rr*sn,ny=slope,nz=sn-dr/rr*cs,l=1/Math.hypot(nx,ny,nz);nx*=l;ny*=l;nz*=l;
-   const tint=.90+.13*Math.sin(a*3+t*11+phase);
+   const a=k/sides*TAU,cs=Math.cos(a),sn=Math.sin(a),rr=radius(a,t);
+   const dr=(radius(a+.001,t)-radius(a-.001,t))/.002;
+   const lo=Math.max(0,t-.0005),hi=Math.min(1,t+.0005),verticalSlope=(radius(a,hi)-radius(a,lo))/Math.max(.00001,(hi-lo)*h);
+   let nx=cs+dr/rr*sn,ny=-verticalSlope,nz=sn-dr/rr*cs,l=1/Math.hypot(nx,ny,nz);nx*=l;ny*=l;nz*=l;
+   const tint=.80+.14*Math.sin(a*2+t*17+phase)+.14*noise(Math.cos(a)*4+t*3,Math.sin(a)*4+t*16);
    G.vertex(centerX+cs*rr,y+h*t,centerZ+sn*rr,nx,ny,nz,[bark[0]*tint,bark[1]*tint,bark[2]*tint],10);
    if(j<rings&&k<sides){const q=base+j*(sides+1)+k;G.i.push(q,q+1,q+sides+1,q+1,q+sides+2,q+sides+1)}
   }
@@ -777,35 +1001,51 @@ function cedar(x,z,h,r,sacred=false){
  const y=ground(x,z),leanX=(random()-.5)*1.4,leanZ=(random()-.5)*1.4;
  const bark=sacred?[.235,.18,.125]:[.16+random()*.025,.12,.082];
  trunkMesh(x,y-.07,z,h+.07,r,leanX,leanZ,bark,sacred);
- const rootCount=sacred?9:4;
+ const rootCount=sacred?7:3;
  for(let i=0;i<rootCount;i++){
-  const a=i/rootCount*TAU+random()*.24,len=r*(1.7+random()*.7),dx=Math.cos(a),dz=Math.sin(a);
-  G.curve(t=>{
-   const distance=r*.45+t*len,xx=x+dx*distance-dz*Math.sin(t*Math.PI)*r*.22,zz=z+dz*distance+dx*Math.sin(t*Math.PI)*r*.22;
-   return[xx,mix(y+r*.24,ground(xx,zz)-.30,smooth(t))+.045*r*Math.sin(t*Math.PI),zz];
-  },t=>r*.35*Math.pow(1-t,1.7)+.006,bark,10,sacred?22:11,sacred?18:10,.65);
+  const a=i/rootCount*TAU+(random()-.5)*.64,len=r*(1.8+random()*.90),dx=Math.cos(a),dz=Math.sin(a);
+  const bend=(random()-.5)*r*.95;
+  const path=t=>{
+   const distance=r*.40+t*len,turn=Math.sin(t*Math.PI)*bend;
+   const xx=x+dx*distance-dz*turn,zz=z+dz*distance+dx*turn;
+   const contact=ground(xx,zz);
+   return[xx,mix(y+r*.32,contact-.34,smooth(t))+.055*r*Math.sin(t*Math.PI*1.3),zz];
+  };
+  G.curve(path,t=>r*.40*Math.pow(1-t,1.9)+.005,bark,10,sacred?30:14,sacred?22:12,.77);
+  if(sacred){
+   const joint=path(.40),side=i%2?1:-1,branchA=a+side*.65;
+   G.curve(t=>{
+    const xx=joint[0]+Math.cos(branchA)*len*.58*t,zz=joint[2]+Math.sin(branchA)*len*.58*t;
+    return[xx,mix(joint[1]-.045,ground(xx,zz)-.24,smooth(t)),zz];
+   },t=>r*.12*Math.pow(1-t,1.8)+.004,bark,10,20,14,.78);
+   const moss=path(.64);
+   G.rock(moss[0],ground(moss[0],moss[2])+.025,moss[2],r*.20,.055,r*.16,[.080,.14,.060],0,10,5,.12);
+  }
  }
- const branches=(sacred?detail.layers+2:detail.layers)*(sacred?detail.arms+3:detail.arms);
- const crownStart=sacred?.365:h<18?.24:.47,crownSpan=sacred?.60:h<18?.71:.49;
- const rotation=random()*TAU;
+ const branches=sacred?14+detailLevel*4:7+detailLevel*3;
+ const crownStart=sacred?.24:h<18?.28:.54,crownSpan=sacred?.68:h<18?.61:.37;
+ const rotation=random()*TAU,spread=r*(sacred?6.5:5.8)+h*(sacred?.015:.025);
  for(let k=0;k<branches;k++){
-  const t=(k+.2+random()*.65)/branches,level=crownStart+t*crownSpan;
-  const yy=y+h*level+(random()-.5)*h*.032;
-  const a=rotation+k*2.399963+(random()-.5)*.65;
-  const envelope=(.68+.55*Math.sin(t*Math.PI))*Math.pow(1-t,.29);
-  const len=r*(sacred?5.3:6.25)*envelope*(.64+random()*.63)+.30;
+  const t=(k+random()*.70)/branches,level=crownStart+t*crownSpan;
+  const yy=y+h*level+(random()-.5)*h*.045,a=rotation+k*2.399963+(random()-.5)*.80;
+  const len=spread*(.58+random()*.48)*(1-t*.20);
   const xx=x+leanX*level*level,zz=z+leanZ*level*level;
-  bough(xx,yy,zz,a,len,[.055+random()*.02,.145+random()*.04,.09+random()*.02],.11+t*.10);
+  bough(xx,yy,zz,a,len,[.050+random()*.018,.133+random()*.031,.083+random()*.020],.10+t*.12);
  }
+ crownTuft(x+leanX,y+h*.965,z+leanZ,spread*.28,spread*.37,spread*.25,rotation,
+  [.055,.145,.092],.22);
  if(sacred){
   for(let strand=0;strand<3;strand++)tubePath(t=>{
    const a=t*TAU,p=t*TAU*55+strand*TAU/3,rr=r*1.09+Math.cos(p)*.065;
    return[x+Math.cos(a)*rr,y+3+Math.sin(a)*.10+Math.sin(p)*.065,z+Math.sin(a)*rr];
   },.075,C.rope,7,220,5);
-  for(let i=0;i<10;i++){const a=i/10*TAU;paper(x+Math.cos(a)*(r+.28),y+2.84,z+Math.sin(a)*(r+.28),1.25,Math.PI*.5-a)}
+  for(let i=0;i<8;i++){
+   const a=i/8*TAU;
+   paper(x+Math.cos(a)*(r+.28),y+2.84,z+Math.sin(a)*(r+.28),.91,Math.PI*.5-a);
+  }
   for(let i=0;i<8;i++){
    const a=i/8*TAU,rr=r*(1.2+random()*.8);
-   G.rock(x+Math.cos(a)*rr,y+.04,z+Math.sin(a)*rr,.32,.075,.28,C.moss,0,8,4,.13);
+   G.rock(x+Math.cos(a)*rr,y+.04,z+Math.sin(a)*rr,.32,.075,.28,C.moss,0,10,5,.10);
   }
   G.box(x-3,y+.62,z+2.8,.18,1.24,.16,C.wood,1);G.box(x-3,y+1.3,z+2.8,.85,.55,.13,C.wood,1);
   medallion(x-3,y+1.3,z+2.88,.14,[.65,.60,.39]);
@@ -827,11 +1067,11 @@ function buildWorld(){
    G.box(x,.06+(random()-.5)*.025,z+(random()-.5)*.035,tileW*.94,.115,tileD*.92,[.29+random()*.055,.31+random()*.05,.26+random()*.05],2,(random()-.5)*.023);
   }
  }
- const riverSegments=Math.round(180*detail.tess),riverColumns=detailLevel===0?5:8,waterBase=W.v.length/12;
+ const riverSegments=Math.round(240*detail.tess),riverColumns=detailLevel===0?6:10,waterBase=W.v.length/12;
  for(let j=0;j<riverSegments;j++){
   const z=-62+j*124/(riverSegments-1),x=streamX(z),w=2.15+.10*Math.sin(z*.31);
   for(let k=0;k<=riverColumns;k++){
-   W.vertex(x+(k/riverColumns-.5)*w*2,-.25,z,0,1,0,[.06,.22,.18],5);
+   W.vertex(x+(k/riverColumns-.5)*w*2,-.25,z,0,1,0,[.04,.14,.12],5);
    if(j<riverSegments-1&&k<riverColumns){
     const q=waterBase+j*(riverColumns+1)+k;W.i.push(q,q+1,q+riverColumns+1,q+1,q+riverColumns+2,q+riverColumns+1);
    }
@@ -840,7 +1080,7 @@ function buildWorld(){
    const xx=x+side*(2.25+random()*.55),zz=z+random(),gy=ground(xx,zz),s=.23+random()*.37;
    if(gy>-.16){
     G.rock(xx,gy+s*.18,zz,s,s*.49,s*.82,[.17,.205,.18],12,8,4,.24);
-    if(random()>.38)G.rock(xx-.04,gy+s*.58,zz,s*.75,.045,s*.61,C.moss,0,8,3,.12);
+    if(random()>.38)G.rock(xx-.04,gy+s*.58,zz,s*.75,.045,s*.61,C.moss,0,9,4,.10);
    }
   }
   if(j%2===0)G.rock(x+(random()-.5)*2.35,-.73,z,.12+random()*.21,.105,.18,[.20,.235,.19],12,7,4,.25);
@@ -849,23 +1089,23 @@ function buildWorld(){
   const z=27,xx=streamX(z)-1.8+i*.72;G.rock(xx,-.20,z,.34,.16,.31,[.21,.25,.21],12,8,4,.16);
  }
  for(let i=0;i<LANTERNS.length;i+=2)lantern(LANTERNS[i],LANTERNS[i+1]);
- torii();mainShrine();auxiliary();cedar(11.7,-12.5,57,2,true);
+ torii();mainShrine();auxiliary();cedar(SACRED_X,SACRED_Z,57,2,true);
  const spread=detailLevel===0?120:detailLevel===1?150:175;
  for(let n=0;n<detail.trees;n++){
   let x=0,z=0,valid=false,r=.40+random()*.49;
   for(let tries=0;tries<100&&!valid;tries++){
    x=(random()-.5)*spread;z=(random()-.5)*(spread+2)-5;
    valid=!(Math.abs(x)<10.7&&z>-43&&z<55)&&!(Math.abs(x)<15&&z<-15&&z>-43)
-    &&Math.hypot(x-11.7,z+12.5)>8&&Math.hypot(x-21,z+29)>5.4
+    &&Math.hypot(x-SACRED_X,z-SACRED_Z)>8&&Math.hypot(x-21,z+29)>5.4
     &&!(Math.abs(x-streamX(z))<3.2&&Math.abs(z)<65)&&treeSiteClear(x,z,r);
   }
   if(valid)cedar(x,z,29+random()*20,r);
  }
  for(let i=0;i<detail.ringTrees;i++){
   const side=i%2?1:-1,z=-57+Math.floor(i/2)*112/(detail.ringTrees/2-1),x=side*(13+random()*9),r=.48+random()*.3;
-  if(Math.hypot(x-11.7,z+12.5)>8&&Math.hypot(x-21,z+29)>6&&treeSiteClear(x,z,r))cedar(x,z,33+random()*15,r);
+  if(Math.hypot(x-SACRED_X,z-SACRED_Z)>8&&Math.hypot(x-21,z+29)>6&&treeSiteClear(x,z,r))cedar(x,z,33+random()*15,r);
  }
- // A young, low-crowned cedar intercepts the actual left-edge roof sightline.
+ // Preserve the clean left edge of the forest-shrine composition.
  cedar(16.2,-22.0,12.5,.60);
  cedar(16.2,-25.4,12.5,.34);cedar(15.6,-29.7,15,.39);
  for(let i=0;i<detail.rocks;i++){
@@ -873,7 +1113,7 @@ function buildWorld(){
   if(Math.abs(x)<3.7||Math.abs(x-streamX(z))<2.65||(Math.abs(x)<9&&z<-16&&z>-35))continue;
   const s=.25+Math.pow(random(),2)*1.1,y=ground(x,z);
   G.rock(x,y+s*.21,z,s,s*.6,s*.85,[.27,.30,.26],2,9,5,.18);
-  G.rock(x-.04,y+s*.67,z,s*.83,s*.12,s*.71,[.13,.21,.095],0,8,3,.12);
+  G.rock(x-.04,y+s*.67,z,s*.83,s*.12,s*.71,[.11,.18,.080],0,10,5,.10);
  }
  for(let i=0;i<detail.ferns;i++){
   const x=(random()-.5)*(detailLevel===0?80:110),z=(random()-.5)*(detailLevel===0?103:128)-7;
@@ -891,7 +1131,7 @@ function buildWorld(){
  hydrangea(-11.1,7.2,.85);hydrangea(-5.2,1.1,.82);
  for(let i=0;i<Math.round(140*detail.tess);i++){
   const z=-18+random()*63,x=(random()>.5?1:-1)*(3.1+random()*.5);
-  G.rock(x,.09,z,.15+random()*.18,.055,.10+random()*.15,C.moss,0,6,3,.10);
+  G.rock(x,.065,z,.12+random()*.16,.035,.12+random()*.18,[.085,.145,.061],0,12,6,.045);
  }
 }
 const COMMON=`
@@ -905,7 +1145,12 @@ struct Uniforms {
 const LAMPS=array<vec2f,10>(
  vec2f(-4.7,14.),vec2f(4.7,14.),vec2f(-4.35,4.9),vec2f(4.7,5.5),
  vec2f(-4.7,-1.),vec2f(4.7,-1.),vec2f(-4.7,-8.),vec2f(4.7,-8.),
- vec2f(-8.8,-14.),vec2f(8.8,-14.)
+ vec2f(-6.8,-22.),vec2f(6.8,-22.)
+);
+const SHAFT_COLUMNS=array<vec3f,6>(
+ vec3f(-16.8,23.2,1.65),vec3f(-14.9,4.4,1.35),
+ vec3f(-8.9,-3.6,1.60),vec3f(4.1,-15.6,1.75),
+ vec3f(-25.5,18.8,1.40),vec3f(-1.9,-5.6,1.45)
 );
 fn hash2(p:vec2f)->f32 {
  var p3=fract(vec3f(p.x,p.y,p.x)*.1031);
@@ -928,13 +1173,13 @@ fn skyColor(ray:vec3f)->vec3f {
  return c;
 }
 fn waterWave(p:vec3f)->vec3f {
- let a=p.x*2.7+p.z*3.1+u.camera.w*1.35;
- let b=p.z*6.2-p.x*1.9-u.camera.w*1.9;
- let c=p.x*9.+p.z*2.0+u.camera.w*.8;
- let height=sin(a)*.007+sin(b)*.004+sin(c)*.0015;
- let dx=cos(a)*.0189-cos(b)*.0076+cos(c)*.0135;
- let dz=cos(a)*.0217+cos(b)*.0248+cos(c)*.003;
- return vec3f(height,dx,dz);
+ let rippleA=p.x*1.15+p.z*1.8+u.camera.w*1.30;
+ let rippleB=p.z*3.3-p.x*1.7-u.camera.w*1.8;
+ let rippleC=p.x*4.4+p.z*1.1+u.camera.w*.87;
+ let rippleHeight=sin(rippleA)*.018+sin(rippleB)*.008+sin(rippleC)*.004;
+ let rippleDx=cos(rippleA)*.0207-cos(rippleB)*.0136+cos(rippleC)*.0176;
+ let rippleDz=cos(rippleA)*.0324+cos(rippleB)*.0264+cos(rippleC)*.0044;
+ return vec3f(rippleHeight,rippleDx,rippleDz);
 }
 fn animated(p:vec3f,extra:vec3f)->vec3f {
  if(u32(extra.x)==5u){
@@ -993,25 +1238,24 @@ fn shadowAmount(p:vec3f,nd:f32)->f32 {
 }
 fn atmosphere(c:vec3f,p:vec3f)->vec3f {
  let distanceTo=distance(p,u.camera.xyz);
- let d=max(distanceTo-14.,0.);
+ let d=max(distanceTo-22.,0.);
  let clearing=exp(-(p.x*p.x+(p.z+12.)*(p.z+12.))*.00075);
- let density=u.settings.z*mix(.76,1.12,smoothstep(30.,90.,distanceTo));
- let f=1.-exp(-d*(density+.0015*exp(-max(p.y,0.)*.10)));
+ let density=u.settings.z*mix(.34,1.65,smoothstep(45.,110.,distanceTo));
+ let opticalDepth=d*density+max(distanceTo-80.,0.)*.017;
+ let f=1.-exp(-opticalDepth);
  let tint=mix(vec3f(.035,.135,.123),vec3f(.28,.33,.19),clearing*.33);
  return mix(c,tint,f);
 }
 fn barkRelief(p:vec3f,n:vec3f)->f32 {
- let wx=noise2(vec2f(p.x*1.35,p.y*.19))*.73;
- let wz=noise2(vec2f(p.z*1.35,p.y*.19))*.73;
- let cx=p.x*10.7+wx+sin(p.y*.31+p.z*.6)*.14;
- let cz=p.z*10.7+wz+sin(p.y*.31+p.x*.6)*.14;
- let gx=abs(fract(cx)-.5)*2.;
- let gz=abs(fract(cz)-.5)*2.;
- let rx=pow(smoothstep(.07,.47,gx),.65);
- let rz=pow(smoothstep(.07,.47,gz),.65);
- let nx=pow(abs(n.x),4.);
- let nz=pow(abs(n.z),4.);
- return (rz*nx+rx*nz)/(nx+nz+.0001);
+ let barkWarpX=noise2(vec2f(p.x*1.17,p.y*.28))*2.25;
+ let barkWarpZ=noise2(vec2f(p.z*1.17,p.y*.28))*2.25;
+ let barkNoiseX=noise2(vec2f(p.x*15.8+barkWarpX,p.y*.73+sin(p.x*1.4)*.31));
+ let barkNoiseZ=noise2(vec2f(p.z*15.8+barkWarpZ,p.y*.73+sin(p.z*1.4)*.31));
+ let barkRidgeX=smoothstep(.17,.77,barkNoiseX);
+ let barkRidgeZ=smoothstep(.17,.77,barkNoiseZ);
+ let barkWeightX=pow(abs(n.x),4.);
+ let barkWeightZ=pow(abs(n.z),4.);
+ return (barkRidgeZ*barkWeightX+barkRidgeX*barkWeightZ)/(barkWeightX+barkWeightZ+.0001);
 }
 @fragment fn meshFragment(v:MeshOut)->@location(0) vec4f {
  let p=v.world;var n=normalize(v.normal);let m=v.material;
@@ -1040,7 +1284,9 @@ fn barkRelief(p:vec3f,n:vec3f)->f32 {
  }
  if(m==14u){
   let fissure=pow(.5+.5*sin(p.x*63.+noise2(vec2f(p.y*6.,p.z*8.))*7.),18.);
-  albedo*=1.-fissure*.28;
+  let stoneWeather=noise2(vec2f(p.x*18.+p.z*7.,p.y*20.));
+  albedo*=1.-fissure*.30;
+  albedo=mix(albedo,vec3f(.115,.17,.115),smoothstep(.65,.87,stoneWeather)*.27);
   rough=.96;
  }
  if(m==3u){
@@ -1058,37 +1304,54 @@ fn barkRelief(p:vec3f,n:vec3f)->f32 {
  }
  if(m==4u){
   let grey=dot(albedo,vec3f(.25,.60,.15));
+  let needleFade=1.-smoothstep(.025,.18,footprint);
+  let needleNoise=noise2(p.xz*9.3+vec2f(p.y*4.7,-p.y*3.2));
   albedo=mix(vec3f(grey),albedo,.70)*.92;
+  albedo*=.79+.29*mix(.56,needleNoise,needleFade);
+  rough=.94;
  }
  if(m==7u){
   albedo*=.84+.16*sin(p.x*105.+p.y*89.+p.z*103.);
   rough=.92;
  }
  if(m==8u){
-  albedo*=.96+.035*b;
+  albedo*=.94+.045*b;
+  rough=.98;
  }
  if(m==10u){
   let originalN=n;
   let relief=barkRelief(p,originalN);
-  let hx=barkRelief(p+vec3f(.025,0.,0.),originalN);
-  let hy=barkRelief(p+vec3f(0.,.05,0.),originalN);
-  let hz=barkRelief(p+vec3f(0.,0.,.025),originalN);
-  let gradient=vec3f((hx-relief)/.025,(hy-relief)/.05,(hz-relief)/.025);
   let barkFilter=1.-smoothstep(.025,.16,footprint);
-  n=normalize(n-(gradient-originalN*dot(gradient,originalN))*.075*barkFilter);
-  let broad=noise2(p.xz*1.55+vec2f(p.y*.14,p.y*.09));
-  let fine=noise2(p.xz*20.+vec2f(p.y*.63,-p.y*.37));
-  albedo*=mix(.73,.31+.91*relief,barkFilter)+.18*broad+.075*fine;
-  let lichen=smoothstep(.68,.88,noise2(p.xz*2.8+vec2f(p.y*.53)))*.17;
-  albedo=mix(albedo,vec3f(.27,.285,.19),lichen);
-  let moss=(1.-smoothstep(.18,.75,p.y))*smoothstep(.38,.78,broad)*.50;
-  albedo=mix(albedo,vec3f(.085,.15,.065),moss);
+  if(footprint<.16){
+   let barkOffsetX=barkRelief(p+vec3f(.025,0.,0.),originalN);
+   let barkOffsetY=barkRelief(p+vec3f(0.,.05,0.),originalN);
+   let barkOffsetZ=barkRelief(p+vec3f(0.,0.,.025),originalN);
+   let barkGradient=vec3f((barkOffsetX-relief)/.025,(barkOffsetY-relief)/.05,(barkOffsetZ-relief)/.025);
+   n=normalize(n-(barkGradient-originalN*dot(barkGradient,originalN))*.065*barkFilter);
+  }
+  let broad=noise2(p.xz*1.55+vec2f(p.y*.19,p.y*.13));
+  let fine=noise2(p.xz*20.+vec2f(p.y*.73,-p.y*.43));
+  let barkAcross=select(p.x,p.z,abs(originalN.x)>abs(originalN.z));
+  let knotCell=floor(vec2f(barkAcross*.42,p.y*.19));
+  let knotLocal=fract(vec2f(barkAcross*.42,p.y*.19))-vec2f(.5);
+  let knotOffset=vec2f(hash2(knotCell+vec2f(13.,7.)),hash2(knotCell+vec2f(3.,19.)))-vec2f(.5);
+  let knotDelta=(knotLocal-knotOffset*.37)*vec2f(7.,5.);
+  let knotRadius=length(knotDelta);
+  let knotMask=(1.-smoothstep(.55,1.45,knotRadius))*smoothstep(.45,.80,hash2(knotCell));
+  let knotRings=.5+.5*sin(knotRadius*14.+broad*2.);
+  albedo*=mix(.70,.28+.94*relief,barkFilter)+.23*broad+.065*fine;
+  albedo*=1.-knotMask*(.17+.24*knotRings)*barkFilter;
+  let lichen=smoothstep(.67,.86,noise2(p.xz*2.8+vec2f(p.y*.53)))*.22;
+  albedo=mix(albedo,vec3f(.255,.275,.18),lichen);
+  let mossHeight=1.-smoothstep(.35,7.5,p.y);
+  let mossPatch=smoothstep(.50,.79,noise2(p.xz*1.2+vec2f(p.y*.32,-p.y*.18)));
+  albedo=mix(albedo,vec3f(.065,.125,.055),mossHeight*mossPatch*.63);
   rough=.97;
  }
  if(m==13u){
-  let thread=noise2(vec2f(p.x*260.,p.y*310.));
-  let threadFade=1.-smoothstep(.001,.012,footprint);
-  albedo*=.91+.12*thread*threadFade;
+  let clothThread=noise2(vec2f(p.x*260.,p.y*310.));
+  let clothThreadFade=1.-smoothstep(.001,.012,footprint);
+  albedo*=.91+.12*clothThread*clothThreadFade;
   rough=.99;
  }
  let nd=max(dot(n,sun),0.);let shade=shadowAmount(p,nd);
@@ -1114,16 +1377,27 @@ fn barkRelief(p:vec3f,n:vec3f)->f32 {
  }
  if(m==5u){
   let wave=waterWave(p);
-  n=normalize(vec3f(-wave.y,1.,-wave.z));
+  let rippleDetailA=p.z*19.+p.x*7.+u.camera.w*3.2;
+  let rippleDetailB=p.z*11.-p.x*13.-u.camera.w*2.7;
+  let rippleFade=1.-smoothstep(.045,.19,footprint);
+  let rippleDx=(cos(rippleDetailA)*.044-cos(rippleDetailB)*.039)*rippleFade;
+  let rippleDz=(cos(rippleDetailA)*.066+cos(rippleDetailB)*.033)*rippleFade;
+  n=normalize(vec3f(-wave.y-rippleDx,1.,-wave.z-rippleDz));
   let fres=.018+.50*pow(1.-max(dot(n,viewDir),0.),5.);
   let reflected=skyColor(reflect(-viewDir,n));
-  let glint=pow(max(dot(reflect(-sun,n),viewDir),0.),180.);
-  let thread=pow(.5+.5*sin(p.z*37.+p.x*13.+u.camera.w*3.2),18.);
-  let highlight=min(glint*thread*.65,.35)*shade;
-  let current=noise2(p.xz*3.2+vec2f(u.camera.w*.08,-u.camera.w*.35));
-  color=mix(vec3f(.022,.09,.078),reflected,fres)+vec3f(.65,.67,.48)*highlight;
-  color+=vec3f(.035,.085,.065)*current;
-  return vec4f(atmosphere(color,p),.38+fres*.35);
+  let glint=pow(max(dot(reflect(-sun,n),viewDir),0.),115.);
+  let channelCenter=-8.7+1.65*sin(p.z*.061)+.55*sin(p.z*.19);
+  let across=p.x-channelCenter;
+  let flowWarp=noise2(vec2f(across*3.2,p.z*.85+u.camera.w*.31));
+  let flowPhase=p.z*8.8+sin(across*3.5)*1.2+flowWarp*2.4+u.camera.w*2.4;
+  let flowCrest=pow(.5+.5*sin(flowPhase),13.)*(.35+.65*noise2(vec2f(across*4.,p.z*2.+u.camera.w*.48)));
+  let bankFoam=smoothstep(1.55,2.08,abs(across))*flowCrest*.055;
+  let highlight=min(glint*.40,.29)*shade;
+  color=mix(vec3f(.012,.058,.049),reflected*.83,fres);
+  color+=vec3f(.41,.48,.34)*highlight;
+  color+=vec3f(.048,.073,.058)*flowCrest*rippleFade;
+  color+=vec3f(.23,.27,.20)*bankFoam;
+  return vec4f(atmosphere(color,p),.25+fres*.43);
  }
  return vec4f(atmosphere(color,p),1.);
 }
@@ -1139,7 +1413,7 @@ const BIRD_END:u32=${detail.motes+detail.leaves+detail.butterflies+detail.birds}
 struct ParticleOut {
  @builtin(position) position:vec4f,@location(0) uv:vec2f,
  @location(1) color:vec3f,@location(2) @interpolate(flat) kind:u32,
- @location(3) distance:f32,@location(4) @interpolate(flat) part:u32
+ @location(3) viewDistance:f32,@location(4) @interpolate(flat) part:u32
 }
 @vertex fn particleVertex(@builtin(vertex_index) vi:u32,@builtin(instance_index) id:u32)->ParticleOut {
  var points=array<vec2f,6>(vec2f(-1.,-1.),vec2f(1.,-1.),vec2f(1.,1.),vec2f(-1.,-1.),vec2f(1.,1.),vec2f(-1.,1.));
@@ -1162,11 +1436,11 @@ struct ParticleOut {
   color=mix(vec3f(.105,.145,.085),vec3f(.29,.25,.135),h3);kind=1u;
  }else if(id<BUTTERFLY_END){
   let side=select(-1.,1.,h>.5);
-  p=vec3f(side*(3.9+h2*2.4)+sin(t*.73+h*40.)*.65,
+  p=vec3f(side*(4.8+h2*2.8)+sin(t*.73+h*40.)*.65,
    1.2+h3*1.3+sin(t*1.1+h*30.)*.28,
-   -5.-h2*10.+cos(t*.31+h3*30.)*1.1);
-  size=vec2f(.19,.20);
-  color=mix(vec3f(.64,.37,.15),vec3f(.29,.43,.59),step(.65,h3));kind=2u;
+   3.+h2*22.+cos(t*.31+h3*30.)*1.1);
+  size=vec2f(.17,.18);
+  color=mix(vec3f(.42,.225,.075),vec3f(.105,.205,.285),step(.78,h3));kind=2u;
  }else if(id<BIRD_END){
   p=vec3f((fract(h+t*.006)-.5)*150.,29.+h3*10.+sin(t*.3+h*60.),-57.-h2*25.);
   size=vec2f(.45,.19);color=vec3f(.045,.08,.065);kind=3u;
@@ -1175,31 +1449,38 @@ struct ParticleOut {
   p=vec3f(lamp.x,1.55,lamp.y);size=vec2f(.30);color=vec3f(1.5,.52,.12);kind=4u;
  }
  var o:ParticleOut;
- o.uv=q;o.color=color;o.kind=kind;o.distance=distance(p,u.camera.xyz);o.part=0u;
+ o.uv=q;o.color=color;o.kind=kind;o.viewDistance=distance(p,u.camera.xyz);o.part=0u;
  if((kind!=2u&&vi>=6u)||kind==4u){
   o.position=vec4f(2.,2.,2.,1.);return o;
  }
  var pos=p+u.right.xyz*q.x*size.x+u.up.xyz*q.y*size.y;
  if(kind==2u){
   let part=vi/6u;o.part=part;
-  let right=u.right.xyz;let up=u.up.xyz;let normal=normalize(cross(right,up));
+  let flightHeading=t*.29+h*6.2831853;
+  let wingAxis=vec3f(cos(flightHeading),0.,-sin(flightHeading));
+  let bodyAxis=normalize(vec3f(sin(flightHeading),.12*sin(t*.7+h*20.),cos(flightHeading)));
+  let wingNormal=normalize(cross(wingAxis,bodyAxis));
   if(part<4u){
    let side=select(-1.,1.,part%2u==1u);
-   let span=(q.x+1.)*.5;let flap=sin(t*10.5+h*60.)*.96;
-   let fore=part<2u;let wingWidth=select(.135,.195,fore);
-   let centerY=select(-.055-span*.030,.020+span*.072,fore);
-   let halfHeight=select(.029+span*.038,.030+span*.075,fore);
-   pos=p+right*(side*(.009+span*wingWidth*(.38+.62*cos(flap))))
-    +up*(centerY+q.y*halfHeight)+normal*(sin(flap)*span*wingWidth*.74);
+   let span=(q.x+1.)*.5;
+   let flap=sin(t*(11.5+h2*3.)+h*60.)*1.12;
+   let fore=part<2u;
+   let wingWidth=select(.115,.172,fore);
+   let centerY=select(-.047-span*.022,.017+span*.057,fore);
+   let halfHeight=select(.022+span*.031,.025+span*.064,fore);
+   pos=p+wingAxis*(side*(.008+span*wingWidth*cos(flap)))
+    +bodyAxis*(centerY+q.y*halfHeight)+wingNormal*(sin(flap)*span*wingWidth);
   }else if(part==4u){
-   pos=p+right*q.x*.012+up*q.y*.125+normal*.008;
-   o.color=vec3f(.065,.055,.035);
+   let bodyWidth=select(.010,.016,q.y>.62);
+   pos=p+wingAxis*q.x*bodyWidth+bodyAxis*q.y*.113+wingNormal*.009;
+   o.color=vec3f(.050,.042,.026);
   }else{
    let side=select(-1.,1.,vi>=33u);let k=vi%3u;
-   let xx=select(.004,.046,k==1u)*side;let yy=select(.110,.172,k==1u);
-   let thickness=select(0.,.005,k==2u);
-   pos=p+right*(xx+thickness)+up*yy+normal*.009;
-   o.color=vec3f(.065,.055,.035);o.uv=vec2f(0.);
+   let xx=select(.004,.036,k==1u)*side;
+   let yy=select(.103,.157,k==1u);
+   let thickness=select(0.,.004,k==2u);
+   pos=p+wingAxis*(xx+thickness)+bodyAxis*yy+wingNormal*.010;
+   o.color=vec3f(.050,.042,.026);o.uv=vec2f(0.);
   }
  }
  o.position=u.vp*vec4f(pos,1.);return o;
@@ -1216,14 +1497,15 @@ struct ParticleOut {
  }
  if(v.kind==2u){
   if(v.part<4u){
-   let scallop=.90+.05*sin((q.x+1.)*11.);
-   alpha=1.-smoothstep(scallop-.06,scallop,abs(q.y));
-   let rim=max(smoothstep(.64,.82,abs(q.y)),smoothstep(.70,.96,q.x));
-   color=mix(color,vec3f(.075,.065,.045),rim*.90);
-   let veins=pow(.5+.5*cos(q.y*14.+q.x*6.),15.)*.30;
+   let scallop=.88+.055*sin((q.x+1.)*11.);
+   let wingTip=1.-smoothstep(.82,1.,q.x);
+   alpha=(1.-smoothstep(scallop-.065,scallop,abs(q.y)))*wingTip;
+   let rim=max(smoothstep(.60,.82,abs(q.y)),smoothstep(.68,.94,q.x));
+   color=mix(color,vec3f(.038,.033,.021),rim*.92);
+   let veins=pow(.5+.5*cos(q.y*14.+q.x*6.),15.)*.36;
    color*=1.-veins;
    let spot=length((q-vec2f(.35,.20))*vec2f(2.1,2.7));
-   color=mix(color,vec3f(.87,.80,.58),(1.-smoothstep(.14,.26,spot))*.85);
+   color=mix(color,vec3f(.66,.55,.31),(1.-smoothstep(.14,.26,spot))*.72);
   }else{
    alpha=1.;
    if(v.part==4u){
@@ -1238,7 +1520,7 @@ struct ParticleOut {
  if(alpha<.008){
   discard;
  }
- let fog=exp(-max(v.distance-10.,0.)*.011);
+ let fog=exp(-max(v.viewDistance-10.,0.)*.011);
  return vec4f(color*fog,alpha*fog);
 }
 `;
@@ -1260,12 +1542,60 @@ fn lightAt(p:vec3f)->f32 {
  return textureSampleCompareLevel(shadowDepth,shadowCompare,uv,s.z-.0005);
 }
 fn canopyOpening(p:vec3f)->f32 {
- let plane=p.xz+u.sun.xz*((24.-p.y)/u.sun.y);
- let a=(plane-vec2f(-12.5,14.))*vec2f(.38,.52);
- let b=(plane-vec2f(-13.,-5.))*vec2f(.45,.36);
- let c=(plane-vec2f(-18.,28.))*vec2f(.34,.53);
- let d=(plane-vec2f(-7.,2.))*vec2f(.51,.43);
- return min(1.,exp(-dot(a,a))+.85*exp(-dot(b,b))+.75*exp(-dot(c,c))+.6*exp(-dot(d,d)));
+ let openingPlane=p.xz+u.sun.xz*((30.-p.y)/u.sun.y);
+ var openingStrength=0.;
+ for(var openingIndex=0u;openingIndex<6u;openingIndex+=1u){
+  let openingColumn=SHAFT_COLUMNS[openingIndex];
+  let openingOffset=(openingPlane-openingColumn.xy)/openingColumn.z;
+  openingStrength+=exp(-dot(openingOffset,openingOffset)*1.6);
+ }
+ return min(openingStrength,1.);
+}
+fn shaftIntegral(shaftRay:vec3f,shaftLimit:f32,shaftColumn:vec3f)->f32 {
+ let shaftBase=(u.camera.xz+u.sun.xz*((30.-u.camera.y)/u.sun.y)-shaftColumn.xy)/shaftColumn.z;
+ let shaftRate=(shaftRay.xz-u.sun.xz*(shaftRay.y/u.sun.y))/shaftColumn.z;
+ let shaftA=dot(shaftRate,shaftRate);
+ let shaftB=dot(shaftBase,shaftRate);
+ let shaftC=dot(shaftBase,shaftBase)-1.;
+ var shaftInterval=vec2f(0.,shaftLimit);
+ if(shaftA<.000001){
+  if(shaftC>0.){
+   return 0.;
+  }
+ }else{
+  let shaftDiscriminant=shaftB*shaftB-shaftA*shaftC;
+  if(shaftDiscriminant<=0.){
+   return 0.;
+  }
+  let shaftRoot=sqrt(shaftDiscriminant);
+  shaftInterval.x=max(0.,(-shaftB-shaftRoot)/shaftA);
+  shaftInterval.y=min(shaftLimit,(-shaftB+shaftRoot)/shaftA);
+ }
+ if(abs(shaftRay.y)>.0001){
+  let shaftGround=(.35-u.camera.y)/shaftRay.y;
+  let shaftTop=(31.-u.camera.y)/shaftRay.y;
+  shaftInterval.x=max(shaftInterval.x,min(shaftGround,shaftTop));
+  shaftInterval.y=min(shaftInterval.y,max(shaftGround,shaftTop));
+ }else{
+  if(u.camera.y<.35||u.camera.y>31.){
+   return 0.;
+  }
+ }
+ if(shaftInterval.y<=shaftInterval.x){
+  return 0.;
+ }
+ let shaftLength=shaftInterval.y-shaftInterval.x;
+ let shaftMid=(shaftInterval.x+shaftInterval.y)*.5;
+ let shaftPoint=u.camera.xyz+shaftRay*shaftMid;
+ let shaftRadial=shaftBase+shaftRate*shaftMid;
+ let shaftFalloff=exp(-dot(shaftRadial,shaftRadial)*1.65);
+ let shaftHeight=smoothstep(.35,1.8,shaftPoint.y)*(1.-smoothstep(27.,31.,shaftPoint.y));
+ let shaftP0=u.camera.xyz+shaftRay*mix(shaftInterval.x,shaftInterval.y,.18);
+ let shaftP1=shaftPoint;
+ let shaftP2=u.camera.xyz+shaftRay*mix(shaftInterval.x,shaftInterval.y,.82);
+ let shaftVisibility=(lightAt(shaftP0)+2.*lightAt(shaftP1)+lightAt(shaftP2))*.25;
+ let shaftDust=.88+.12*noise2(shaftPoint.xz*.21+vec2f(shaftPoint.y*.13));
+ return shaftLength*shaftFalloff*shaftHeight*shaftVisibility*shaftDust*exp(-shaftMid*.013);
 }
 @fragment fn volumeFragment(v:FullOut)->@location(0) vec4f {
  let dims=vec2i(u.renderSize.xy);
@@ -1273,17 +1603,22 @@ fn canopyOpening(p:vec3f)->f32 {
  let depth=textureLoad(sceneDepth,coord,0);
  let endpoint=worldAt(v.uv,min(depth,.9998));
  let delta=endpoint-u.camera.xyz;let ray=normalize(delta);
- let distanceTo=min(length(delta),105.);let stepLength=distanceTo/${detail.raySteps}.;
- let jitter=hash2(floor(v.position.xy));var scattering=0.;
- for(var i=0;i<${detail.raySteps};i++){
+ let distanceTo=min(length(delta),105.);
+ let stepLength=distanceTo/${Math.max(4,Math.round(detail.raySteps/3))}.;
+ let jitter=hash2(floor(v.position.xy));
+ var scattering=0.;
+ for(var i=0;i<${Math.max(4,Math.round(detail.raySteps/3))};i++){
   let d=(f32(i)+jitter)*stepLength;let p=u.camera.xyz+ray*d;
   let density=exp(-max(p.y-1.,0.)*.075);
-  let lit=lightAt(p);
-  let dust=.78+.22*noise2(p.xz*.23+vec2f(p.y*.08));
-  scattering+=lit*lit*canopyOpening(p)*density*dust*exp(-d*.024)*stepLength;
+  scattering+=lightAt(p)*canopyOpening(p)*density*exp(-d*.024)*stepLength;
  }
- let phase=.75+.65*pow(max(dot(ray,u.sun.xyz),0.),4.);
- return vec4f(vec3f(1.,.82,.47)*scattering*.085*phase,1.);
+ var shaftEnergy=0.;
+ for(var shaftIndex=0u;shaftIndex<6u;shaftIndex+=1u){
+  shaftEnergy+=shaftIntegral(ray,distanceTo,SHAFT_COLUMNS[shaftIndex]);
+ }
+ let phase=.78+.72*pow(max(dot(ray,u.sun.xyz),0.),4.);
+ let volumeEnergy=min(shaftEnergy*.13*phase,1.35)+scattering*.0035;
+ return vec4f(vec3f(1.,.81,.45)*volumeEnergy,1.);
 }
 fn sampleScene(uv:vec2f)->vec3f {
  return textureSampleLevel(scene,linearSampler,scaledUV(uv,u.sceneScale.xy,vec2f(textureDimensions(scene))),0.).rgb;
@@ -1597,7 +1932,7 @@ async function completeBenchmark(){
   for(let i=0;i<benchmarkFrames;i++)frames[i]={elapsedMs:elapsedLog[i],frameIntervalMs:cpuLog[i],gpuMs:gpu?gpuLog[i]:null};
   const duration=elapsedLog[benchmarkFrames-1],ai=adapter.info;
   latestReport={
-   title:"Komorebi procedural forest",revision:"Polish revision 3",generated:new Date().toISOString(),
+   title:"Komorebi procedural forest",revision:"Polish revision 4",generated:new Date().toISOString(),
    detail:LEVEL_NAMES[detailLevel],phoneMode:PHONE,outputResolution:{width,height},
    renderResolution:{width:benchmarkWidth,height:benchmarkHeight},renderScale:benchmarkScale,
    adaptiveEnabled:dynamicResolution,adaptiveFrozenDuringTest:true,msaaSamples:SAMPLE_COUNT,
