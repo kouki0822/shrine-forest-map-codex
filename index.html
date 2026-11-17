@@ -971,9 +971,9 @@ struct Uniforms {
 }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 const LAMPS=array<vec2f,10>(
- vec2f(-4.7,14),vec2f(4.7,14),vec2f(-4.7,5.5),vec2f(4.7,5.5),
- vec2f(-4.7,-1),vec2f(4.7,-1),vec2f(-4.7,-8),vec2f(4.7,-8),
- vec2f(-8.8,-14),vec2f(8.8,-14)
+ vec2f(-4.7,14.),vec2f(4.7,14.),vec2f(-4.7,5.5),vec2f(4.7,5.5),
+ vec2f(-4.7,-1.),vec2f(4.7,-1.),vec2f(-4.7,-8.),vec2f(4.7,-8.),
+ vec2f(-8.8,-14.),vec2f(8.8,-14.)
 );
 fn hash2(p:vec2f)->f32 {
  var p3=fract(vec3f(p.x,p.y,p.x)*.1031);
@@ -982,8 +982,8 @@ fn hash2(p:vec2f)->f32 {
 }
 fn noise2(p:vec2f)->f32 {
  let i=floor(p);let f=fract(p);let s=f*f*(vec2f(3.)-2.*f);
- return mix(mix(hash2(i),hash2(i+vec2f(1,0)),s.x),
- mix(hash2(i+vec2f(0,1)),hash2(i+vec2f(1,1)),s.x),s.y);
+ return mix(mix(hash2(i),hash2(i+vec2f(1.,0.)),s.x),
+ mix(hash2(i+vec2f(0.,1.)),hash2(i+vec2f(1.,1.)),s.x),s.y);
 }
 fn skyColor(ray:vec3f)->vec3f {
  let h=clamp(ray.y*.75+.20,0.,1.);
@@ -1002,12 +1002,12 @@ fn animated(p:vec3f,extra:vec3f)->vec3f {
 }
 struct FullOut { @builtin(position) position:vec4f,@location(0) uv:vec2f }
 @vertex fn fullVertex(@builtin(vertex_index) i:u32)->FullOut {
- var points=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));
- var o:FullOut;o.position=vec4f(points[i],0,1);
+ var points=array<vec2f,3>(vec2f(-1.,-1.),vec2f(3.,-1.),vec2f(-1.,3.));
+ var o:FullOut;o.position=vec4f(points[i],0.,1.);
  o.uv=points[i]*vec2f(.5,-.5)+vec2f(.5);return o;
 }
 fn worldAt(uv:vec2f,d:f32)->vec3f {
- let p=u.inverseVP*vec4f(uv*vec2f(2,-2)+vec2f(-1,1),d,1);
+ let p=u.inverseVP*vec4f(uv*vec2f(2.,-2.)+vec2f(-1.,1.),d,1.);
  return p.xyz/p.w;
 }
 fn scaledUV(uv:vec2f,scale:vec2f,dims:vec2f)->vec2f {
@@ -1029,13 +1029,13 @@ struct MeshOut {
 }
 @vertex fn meshVertex(v:MeshIn)->MeshOut {
  var o:MeshOut;let p=animated(v.p,v.extra);
- o.position=u.vp*vec4f(p,1);o.world=p;o.normal=v.n;o.color=v.color;o.material=u32(v.extra.x);return o;
+ o.position=u.vp*vec4f(p,1.);o.world=p;o.normal=v.n;o.color=v.color;o.material=u32(v.extra.x);return o;
 }
 @vertex fn shadowVertex(v:MeshIn)->@builtin(position) vec4f {
- return u.lightVP*vec4f(animated(v.p,v.extra),1);
+ return u.lightVP*vec4f(animated(v.p,v.extra),1.);
 }
 fn shadowAmount(p:vec3f,nd:f32)->f32 {
- let q=u.lightVP*vec4f(p,1);let s=q.xyz/q.w;
+ let q=u.lightVP*vec4f(p,1.);let s=q.xyz/q.w;
  let uv=s.xy*vec2f(.5,-.5)+vec2f(.5);
  if(any(uv<vec2f(.002))||any(uv>vec2f(.998))||s.z<0.||s.z>1.){return 1.;}
  let bias=.00035+.0011*(1.-nd);let e=1.05/${SHADOW_SIZE}.;
@@ -1114,10 +1114,10 @@ fn atmosphere(c:vec3f,p:vec3f)->vec3f {
    color+=vec3f(.07,.14,.10)*(.2+.35*noise2(p.xz*2.+vec2f(t*.11,-t*.18)));
    return vec4f(atmosphere(color,p),.46+fres*.35);
  }
- return vec4f(atmosphere(color,p),1);
+ return vec4f(atmosphere(color,p),1.);
 }
 @fragment fn skyFragment(v:FullOut)->@location(0) vec4f {
- return vec4f(skyColor(normalize(worldAt(v.uv,.9999)-u.camera.xyz)),1);
+ return vec4f(skyColor(normalize(worldAt(v.uv,.9999)-u.camera.xyz)),1.);
 }
 `;
 const PARTICLE_SHADER=COMMON+`
@@ -1131,7 +1131,7 @@ struct ParticleOut {
  @location(3) distance:f32,@location(4) @interpolate(flat) part:u32
 }
 @vertex fn particleVertex(@builtin(vertex_index) vi:u32,@builtin(instance_index) id:u32)->ParticleOut {
- var points=array<vec2f,6>(vec2f(-1,-1),vec2f(1,-1),vec2f(1,1),vec2f(-1,-1),vec2f(1,1),vec2f(-1,1));
+ var points=array<vec2f,6>(vec2f(-1.,-1.),vec2f(1.,-1.),vec2f(1.,1.),vec2f(-1.,-1.),vec2f(1.,1.),vec2f(-1.,1.));
  let q=points[vi%6u];let fi=f32(id);
  let h=hash2(vec2f(fi,3.17));let h2=hash2(vec2f(fi,7.91));let h3=hash2(vec2f(fi,13.1));
  let t=u.camera.w;
@@ -1157,7 +1157,7 @@ struct ParticleOut {
    p=vec3f(lamp.x,1.55,lamp.y);size=vec2f(.30);color=vec3f(1.5,.52,.12);kind=4u;
  }
  var o:ParticleOut;o.uv=q;o.color=color;o.kind=kind;o.distance=distance(p,u.camera.xyz);o.part=0u;
- if(kind!=2u&&vi>=6u){o.position=vec4f(2,2,2,1);return o;}
+ if(kind!=2u&&vi>=6u){o.position=vec4f(2.,2.,2.,1.);return o;}
  var pos=p+u.right.xyz*q.x*size.x+u.up.xyz*q.y*size.y;
  if(kind==2u){
    let part=vi/6u;o.part=part;
@@ -1182,10 +1182,10 @@ struct ParticleOut {
      let yy=select(.110,.172,k==1u);
      let thickness=select(0.,.005,k==2u);
      pos=p+right*(xx+thickness)+up*yy+normal*.009;
-     o.color=vec3f(.065,.055,.035);o.uv=vec2f(0);
+     o.color=vec3f(.065,.055,.035);o.uv=vec2f(0.);
    }
  }
- o.position=u.vp*vec4f(pos,1);return o;
+ o.position=u.vp*vec4f(pos,1.);return o;
 }
 @fragment fn particleFragment(v:ParticleOut)->@location(0) vec4f {
  let q=v.uv;var alpha=0.;var color=v.color;
@@ -1207,7 +1207,7 @@ struct ParticleOut {
      color=mix(color,vec3f(.87,.80,.58),(1.-smoothstep(.14,.26,spot))*.85);
    }else{
      alpha=1.;
-     if(v.part==4u)alpha=1.-smoothstep(.75,1.,abs(q.x)+abs(q.y)*.18);
+     if(v.part==4u){alpha=1.-smoothstep(.75,1.,abs(q.x)+abs(q.y)*.18);}
    }
  }
  if(v.kind==3u){
@@ -1230,7 +1230,7 @@ const POST_SHADER=COMMON+`
 @group(0) @binding(7) var bloomInput:texture_2d<f32>;
 @group(0) @binding(8) var bloomBlur:texture_2d<f32>;
 fn lightAt(p:vec3f)->f32 {
- let q=u.lightVP*vec4f(p,1);let s=q.xyz/q.w;let uv=s.xy*vec2f(.5,-.5)+vec2f(.5);
+ let q=u.lightVP*vec4f(p,1.);let s=q.xyz/q.w;let uv=s.xy*vec2f(.5,-.5)+vec2f(.5);
  if(any(uv<vec2f(.001))||any(uv>vec2f(.999))||s.z<0.||s.z>1.){return 0.;}
  return textureSampleCompareLevel(shadowDepth,shadowCompare,uv,s.z-.0005);
 }
@@ -1257,7 +1257,7 @@ fn canopyOpening(p:vec3f)->f32 {
    scattering+=lit*lit*canopyOpening(p)*density*exp(-d*.022)*stepLength;
  }
  let phase=.55+.45*pow(max(dot(ray,u.sun.xyz),0.),4.);
- return vec4f(vec3f(1.,.82,.44)*scattering*.037*phase,1);
+ return vec4f(vec3f(1.,.82,.44)*scattering*.037*phase,1.);
 }
 fn sampleScene(uv:vec2f)->vec3f {
  return textureSampleLevel(scene,linearSampler,scaledUV(uv,u.sceneScale.xy,vec2f(textureDimensions(scene))),0.).rgb;
@@ -1273,32 +1273,32 @@ fn bright(c:vec3f)->vec3f {
 }
 @fragment fn bloomFragment(v:FullOut)->@location(0) vec4f {
  let e=u.renderSize.zw;var c=bright(sampleScene(v.uv))*.20;
- c+=bright(sampleScene(v.uv+vec2f(-2,-2)*e))*.10;
- c+=bright(sampleScene(v.uv+vec2f(2,-2)*e))*.10;
- c+=bright(sampleScene(v.uv+vec2f(-2,2)*e))*.10;
- c+=bright(sampleScene(v.uv+vec2f(2,2)*e))*.10;
- c+=bright(sampleScene(v.uv+vec2f(-4,0)*e))*.10;
- c+=bright(sampleScene(v.uv+vec2f(4,0)*e))*.10;
- c+=bright(sampleScene(v.uv+vec2f(0,-4)*e))*.10;
- c+=bright(sampleScene(v.uv+vec2f(0,4)*e))*.10;
- return vec4f(c,1);
+ c+=bright(sampleScene(v.uv+vec2f(-2.,-2.)*e))*.10;
+ c+=bright(sampleScene(v.uv+vec2f(2.,-2.)*e))*.10;
+ c+=bright(sampleScene(v.uv+vec2f(-2.,2.)*e))*.10;
+ c+=bright(sampleScene(v.uv+vec2f(2.,2.)*e))*.10;
+ c+=bright(sampleScene(v.uv+vec2f(-4.,0.)*e))*.10;
+ c+=bright(sampleScene(v.uv+vec2f(4.,0.)*e))*.10;
+ c+=bright(sampleScene(v.uv+vec2f(0.,-4.)*e))*.10;
+ c+=bright(sampleScene(v.uv+vec2f(0.,4.)*e))*.10;
+ return vec4f(c,1.);
 }
 @fragment fn blurFragment(v:FullOut)->@location(0) vec4f {
  let e=u.bloomScale.zw;var c=sampleBloomInput(v.uv)*.227027;
- c+=sampleBloomInput(v.uv+vec2f(1.384615,0)*e)*.316216;
- c+=sampleBloomInput(v.uv-vec2f(1.384615,0)*e)*.316216;
- c+=sampleBloomInput(v.uv+vec2f(3.230769,0)*e)*.070270;
- c+=sampleBloomInput(v.uv-vec2f(3.230769,0)*e)*.070270;
- return vec4f(c,1);
+ c+=sampleBloomInput(v.uv+vec2f(1.384615,0.)*e)*.316216;
+ c+=sampleBloomInput(v.uv-vec2f(1.384615,0.)*e)*.316216;
+ c+=sampleBloomInput(v.uv+vec2f(3.230769,0.)*e)*.070270;
+ c+=sampleBloomInput(v.uv-vec2f(3.230769,0.)*e)*.070270;
+ return vec4f(c,1.);
 }
 fn luma(c:vec3f)->f32 {return dot(c,vec3f(.299,.587,.114));}
 fn tone(c:vec3f)->vec3f {
- return clamp((c*(2.51*c+vec3f(.03)))/(c*(2.43*c+vec3f(.59))+vec3f(.14)),vec3f(0),vec3f(1));
+ return clamp((c*(2.51*c+vec3f(.03)))/(c*(2.43*c+vec3f(.59))+vec3f(.14)),vec3f(0.),vec3f(1.));
 }
 @fragment fn finalFragment(v:FullOut)->@location(0) vec4f {
  let e=u.renderSize.zw;let center=sampleScene(v.uv);
- let n=sampleScene(v.uv+vec2f(0,-1)*e);let s=sampleScene(v.uv+vec2f(0,1)*e);
- let w=sampleScene(v.uv+vec2f(-1,0)*e);let east=sampleScene(v.uv+vec2f(1,0)*e);
+ let n=sampleScene(v.uv+vec2f(0.,-1.)*e);let s=sampleScene(v.uv+vec2f(0.,1.)*e);
+ let w=sampleScene(v.uv+vec2f(-1.,0.)*e);let east=sampleScene(v.uv+vec2f(1.,0.)*e);
  let lc=luma(center);let ln=luma(n);let ls=luma(s);let lw=luma(w);let le=luma(east);
  let low=min(lc,min(min(ln,ls),min(lw,le)));let high=max(lc,max(max(ln,ls),max(lw,le)));
  let gradient=vec2f(-(ln-ls),lw-le);let direction=normalize(gradient+vec2f(.00001))*e;
@@ -1307,17 +1307,17 @@ fn tone(c:vec3f)->vec3f {
  c+=textureSampleLevel(volume,linearSampler,scaledUV(v.uv,u.volumeScale.xy,vec2f(textureDimensions(volume))),0.).rgb;
  if(u.settings.y>0.){
    let be=u.bloomScale.zw;var bloom=sampleBloomBlur(v.uv)*.227027;
-   bloom+=sampleBloomBlur(v.uv+vec2f(0,1.384615)*be)*.316216;
-   bloom+=sampleBloomBlur(v.uv-vec2f(0,1.384615)*be)*.316216;
-   bloom+=sampleBloomBlur(v.uv+vec2f(0,3.230769)*be)*.070270;
-   bloom+=sampleBloomBlur(v.uv-vec2f(0,3.230769)*be)*.070270;
+   bloom+=sampleBloomBlur(v.uv+vec2f(0.,1.384615)*be)*.316216;
+   bloom+=sampleBloomBlur(v.uv-vec2f(0.,1.384615)*be)*.316216;
+   bloom+=sampleBloomBlur(v.uv+vec2f(0.,3.230769)*be)*.070270;
+   bloom+=sampleBloomBlur(v.uv-vec2f(0.,3.230769)*be)*.070270;
    c+=bloom*u.settings.y;
  }
  let uv=v.uv-vec2f(.5);let vignette=1.-dot(uv*vec2f(.85,1.1),uv*vec2f(.85,1.1))*.35;
  c=tone(c*1.18*vignette);c=mix(vec3f(luma(c)),c,1.035);
- c=pow(max(c,vec3f(0)),vec3f(1./2.2));
+ c=pow(max(c,vec3f(0.)),vec3f(1./2.2));
  c+=vec3f((hash2(v.position.xy)-.5)/255.);
- return vec4f(clamp(c,vec3f(0),vec3f(1)),1);
+ return vec4f(clamp(c,vec3f(0.),vec3f(1.)),1.);
 }
 `;
 function gpuBuffer(data,usage){
